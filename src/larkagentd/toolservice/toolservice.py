@@ -56,8 +56,90 @@ MAX_BODY = 64 * 1024
 MAX_RESULT = 64 * 1024
 TOOL_PATH = re.compile(r"/v1/tools/([a-z][a-z0-9_]{0,63})")
 
+LARK_READ_REFUSALS = {
+    "lark_permission_unverified": (
+        "I couldn't verify that everyone in this group can view the file. "
+        "Ask the document owner or bot administrator to check how the bot can verify group access."
+    ),
+    "lark_bot_view_denied": (
+        "Lark says this bot can't view the file. Ask the owner to give the bot View "
+        "and check that this group can view it."
+    ),
+    "lark_share_required": (
+        "I couldn't find a Lark View grant for this group or a verified organization link "
+        "that covers it. Ask the owner to check this group's View access."
+    ),
+    "lark_history_source_unavailable": (
+        "The earlier message could no longer be verified. Please share the file link here."
+    ),
+    "link_not_from_user": (
+        "I don't have an eligible link for this file. Please include it in your message."
+    ),
+    "link_not_shared": (
+        "I don't have an eligible link for this file. Please include it in your message."
+    ),
+    "forbidden": (
+        "Lark refused the bot's request. The bot administrator can check the app's "
+        "read scopes and the owner can check its file access."
+    ),
+    "not_found": (
+        "Lark couldn't find the file for this bot. Check the link and the bot's access."
+    ),
+}
+
+LARK_EDIT_REFUSALS = {
+    "lark_bot_edit_denied": (
+        "Lark reports that the bot lacks Edit access. Ask the file owner to give the bot Edit."
+    ),
+    "lark_write_permission": (
+        "Lark's collaborator list shows no Edit or Manage grant for this group. "
+        "Ask the file owner to check the group's grant."
+    ),
+    "lark_edit_unverified": (
+        "The bot has Edit access. Lark won't let it see the collaborator list, so it "
+        "can't verify this group's Edit grant. Ask the file owner to let the bot view "
+        "this file's collaborators."
+    ),
+    "link_not_shared": (
+        "I couldn't verify this link from your message or an earlier message you wrote "
+        "in this thread. Please include the link in your edit request."
+    ),
+    "forbidden": (
+        "Lark refused the bot's edit request or permission check. Ask the bot administrator "
+        "to check the app's write scopes and the file owner's settings."
+    ),
+    "write_outcome_unknown": (
+        "I couldn't verify the result of the edit. Check the document before trying again."
+    ),
+}
+
+LARK_CREATE_REFUSALS = {
+    "bad_slide": (
+        "Provide one to six slides. Each needs a title of up to 72 characters and either "
+        "one to five bullets of up to 100 characters each or validated grouped chart data."
+    ),
+    "lark_slides_create_scope": (
+        "Lark denied the bot's Slides create API call. Ask the app administrator to "
+        "check and release the bot scope slides:presentation:create."
+    ),
+    "artifact_incomplete": (
+        "Lark returned a file ID, but setup or sharing failed. An incomplete file may exist. "
+        "Ask the bot administrator to check the creation stage before trying again."
+    ),
+    "artifact_unverified": (
+        "I couldn't verify that Lark created the file. Check for an existing file before trying again."
+    ),
+}
+
 
 def lark_refusal(code, reader_missing):
+    if code != "not_configured":
+        return {
+            "ok": False,
+            "error": code,
+            "retryable": False,
+            "note": LARK_READ_REFUSALS[code],
+        }
     return {
         "ok": False,
         "error": code,
@@ -127,6 +209,12 @@ class ToolService:
         with self.store.engine.begin() as conn:
             return self.store.note_lark_found(conn, job_id, found, reads)
 
+    def _note_history(self, job_id, found, tool, generation=None):
+        with self.store.engine.begin() as conn:
+            return self.store.note_history_file_links(
+                conn, job_id, found, tool, generation
+            )
+
     def _note_job(self, job_id, **fields):
         with self.store.engine.begin() as conn:
             return self.store.note_job(conn, job_id, **fields)
@@ -162,6 +250,7 @@ class ToolService:
             return reject(403, "invalid_session")
         if turn.get("chat_type") != "group" or not turn.get("chat_id"):
             return reject(403, "group_turn_required")
+        history_files = []
         context = ToolContext(
             turn["owner"],
             turn["credential_version"],
@@ -186,6 +275,7 @@ class ToolService:
                 self.store, self.vault, turn, kind, data, label
             ),
             job_note=lambda **fields: self._note_job(turn["job_id"], **fields),
+            lark_history_record=lambda *proof: history_files.append(proof),
         )
         if name in (
             "lark_read",
@@ -197,6 +287,7 @@ class ToolService:
             "run_confirmed_action",
             "group_knowledge_search",
             "group_knowledge_sources",
+            "group_memory_propose",
         ):
             with self.store.engine.begin() as conn:
                 payload = self.store.job_payload(conn, turn["job_id"]) or {}
@@ -209,12 +300,24 @@ class ToolService:
                 "run_confirmed_action",
                 "group_knowledge_search",
                 "group_knowledge_sources",
+                "group_memory_propose",
             ):
                 context.conversation = payload
             else:
                 context.lark_allowed = frozenset(
                     t for t in payload.get("lark_links") or () if isinstance(t, str)
                 )
+                context.lark_thread_allowed = frozenset(
+                    t
+                    for t in payload.get("lark_thread_links") or ()
+                    if isinstance(t, str)
+                )
+                if name in ("lark_read", "lark_image", "lark_file_read"):
+                    context.lark_allowed = context.lark_allowed.union(
+                        context.lark_thread_allowed
+                    )
+                if name in ("lark_read", "lark_image", "lark_file_read"):
+                    context.lark_history_refs = payload.get("lark_history_refs")
                 found = payload.get("lark_found")
                 context.lark_found = {
                     t: d
@@ -231,12 +334,12 @@ class ToolService:
             if tool.activity_kind
             else None
         )
+        fields = dict(tool=name, actor=actor_ref(context.owner), job_id=turn["job_id"])
         if not decision.allowed:
             emit(
                 "tool.denied",
                 logging.WARNING,
-                tool=name,
-                actor=actor_ref(context.owner),
+                **fields,
                 reason=decision.reason,
             )
             code = DENIED_CODES[decision.reason]
@@ -249,7 +352,6 @@ class ToolService:
                 "ok": False,
                 "error": code,
             }
-        fields = dict(tool=name, actor=actor_ref(context.owner))
         try:
             result = tool.run(context, arguments)
             # Pictures travel beside the result, never inside it: they have their own bounded size, and
@@ -258,17 +360,39 @@ class ToolService:
             payload = json.dumps(result)
             if len(payload) > MAX_RESULT:
                 raise ToolError("result_too_large")
+            for proof in history_files:
+                self._note_history(turn["job_id"], *proof)
         except (ToolError, LarkError) as exc:
-            code = exc.code if isinstance(exc, ToolError) else str(exc)
+            code = exc.code
             activity.finish(self.store, activity_id, started, "failed", error=code)
             self.note_login(context)
-            self.done(fields, started, code)
+            diagnostics = exc.log_fields() if isinstance(exc, LarkError) else {}
+            self.done(fields, started, code, **diagnostics)
             if name == "google_read":
                 return 200, google_refusal(
                     code, self.google.email if self.google else None
                 )
-            if name in ("lark_read", "lark_image") and code == "not_configured":
+            if name in ("lark_read", "lark_image", "lark_file_read") and (
+                code == "not_configured" or code in LARK_READ_REFUSALS
+            ):
                 return 200, lark_refusal(code, reader_missing=self.lark is None)
+            if (
+                name in ("lark_file_edit", "run_confirmed_action")
+                and code in LARK_EDIT_REFUSALS
+            ):
+                return 200, {
+                    "ok": False,
+                    "error": code,
+                    "retryable": False,
+                    "note": LARK_EDIT_REFUSALS[code],
+                }
+            if name == "lark_file_create" and code in LARK_CREATE_REFUSALS:
+                return 200, {
+                    "ok": False,
+                    "error": code,
+                    "retryable": code == "bad_slide",
+                    "note": LARK_CREATE_REFUSALS[code],
+                }
             return 200, {"ok": False, "error": code}
         except Exception as exc:
             activity.finish(
@@ -278,7 +402,30 @@ class ToolService:
             return reject(500, "tool_failed")
         self.note_login(context)
         activity.finish(self.store, activity_id, started, "succeeded", result=result)
-        self.done(fields, started, "ok")
+        stage = None
+        access_basis = None
+        if name in ("lark_file_edit", "run_confirmed_action"):
+            if result.get("confirmation_requested") is True:
+                stage = "confirmation_requested"
+            elif result.get("updated") is True:
+                stage = "write_verified"
+            if stage and result.get("access_basis") == "bot_edit":
+                access_basis = "bot_edit"
+        elif name == "lark_file_create" and result.get("verified") is True:
+            stage = "create_verified"
+        diagnostics = {}
+        if name in (
+            "group_search_discussions",
+            "group_knowledge_search",
+            "group_get_discussion",
+        ):
+            diagnostics = {
+                "result_status": result.get("status"),
+                "reason": result.get("reason"),
+            }
+        self.done(
+            fields, started, "ok", stage=stage, access_basis=access_basis, **diagnostics
+        )
         if pictures:
             return 200, {"ok": True, "result": result, "data_urls": pictures}
         return 200, {"ok": True, "result": result}

@@ -17,13 +17,9 @@ from lark_oapi.api.contact.v3 import (
 from lark_oapi.api.im.v1 import (
     CreateFileRequest,
     CreateFileRequestBody,
-    CreateMessageReactionRequest,
-    CreateMessageReactionRequestBody,
     CreateMessageRequest,
     CreateMessageRequestBody,
-    DeleteMessageReactionRequest,
     DeleteMessageRequest,
-    Emoji,
     GetChatMembersRequest,
     GetChatRequest,
     GetMessageRequest,
@@ -82,10 +78,6 @@ class Lark:
     def __init__(self, config, service):
         self.config, self.service = config, service
         self.bot_id = None
-        self.loading_image_reported = False
-        # The type each status line was sent as, message id -> "post" or "text": Lark edits a message
-        # in the type it has, so each clock edit uses it directly. Forgotten at the final edit.
-        self.status_kinds = {}
         # The SDK's logger writes connection URLs and raw exception details to stdout.
         # Replace it with first-party, credential-free lifecycle events.
         sdk_log = logging.getLogger("Lark")
@@ -118,22 +110,50 @@ class Lark:
         answer_to = payload.get("answer_to")
         mention = render.mention_id(answer_to)
         body = render.inert_mentions(payload["text"]) if answer_to else payload["text"]
-        parts = render.split_message(body)
+        parts = (
+            [render.final_post(body, payload.get("usage_footer", ""))]
+            if payload.get("single_reply")
+            else render.split_message(body)
+        )
         failed = []
-        attempts = [
-            ("post", render.post(parts[0], mention)),
-            ("text", render.plain(parts[0], mention)),
-        ]
-        if payload.get("preview_card"):
-            card = payload["preview_card"]
-            if answer_to:
-                card = render.addressed_card(card, mention)
-            attempts.insert(0, ("interactive", card))
-        if mention:
-            # A valid event identity can still become unmentionable before delivery.
+        attachments = payload.get("attachment_keys") or ()
+        if attachments:
+            # A post's attachment zone keeps the answer and all its files in one reply.
+            attempts = [("post", render.post(parts[0], mention, attachments))]
+            if mention:
+                attempts.append(
+                    ("post", render.post(parts[0], attachments=attachments))
+                )
+        else:
+            cards = [
+                payload[name]
+                for name in ("preview_card", "fallback_card")
+                if payload.get(name)
+            ]
+            attempts = [
+                (
+                    "interactive",
+                    render.addressed_card(card, mention) if answer_to else card,
+                )
+                for card in cards
+            ]
+            if mention:
+                attempts.extend(
+                    ("interactive", render.addressed_card(card, None)) for card in cards
+                )
             attempts.extend(
-                [("post", render.post(parts[0])), ("text", render.plain(parts[0]))]
+                [
+                    ("post", render.post(parts[0], mention)),
+                    ("text", render.plain(parts[0], mention)),
+                ]
             )
+            if mention:
+                attempts.extend(
+                    [
+                        ("post", render.post(parts[0])),
+                        ("text", render.plain(parts[0])),
+                    ]
+                )
         for target in (
             (reply_to,)
             if payload.get("thread") and reply_to
@@ -181,11 +201,8 @@ class Lark:
         if parts:
             emit("delivery.split", logging.INFO, parts=len(parts) + 1)
 
-    def send_file(self, payload, key):
-        """A text file as a file message: uploaded first, then sent like any other message, as
-        a reply in the thread, or plainly if the original message was recalled. Errors carry
-        only an operation and a Lark code."""
-        name, data = payload["file"]["name"], payload["file"]["text"].encode()
+    def upload_file(self, file):
+        name, data = file["name"], file["text"].encode()
         uploaded = self.client.im.v1.file.create(
             CreateFileRequest.builder()
             .request_body(
@@ -199,7 +216,11 @@ class Lark:
         )
         if not uploaded.success():
             raise RuntimeError(f"Lark upload failed (code={uploaded.code})")
-        content = json.dumps({"file_key": uploaded.data.file_key})
+        return uploaded.data.file_key
+
+    def send_file(self, payload, key):
+        """Deliver a standalone file when an interactive answer also needs a button."""
+        content = json.dumps({"file_key": self.upload_file(payload["file"])})
         reply_to = payload.get("reply_to")
         failure = None
         for target in (
@@ -258,109 +279,41 @@ class Lark:
             raise RuntimeError(f"Lark delivery failed (code={result.code})")
         return result.data.message_id
 
-    # Chat status while an agent turn runs; see progress.py. Errors carry only a code.
-    def react(self, message_id):
-        result = self.client.im.v1.message_reaction.create(
-            CreateMessageReactionRequest.builder()
-            .message_id(message_id)
-            .request_body(
-                CreateMessageReactionRequestBody.builder()
-                .reaction_type(Emoji.builder().emoji_type("Typing").build())
-                .build()
-            )
-            .build()
-        )
-        if not result.success():
-            raise RuntimeError(f"Lark reaction failed (code={result.code})")
-        return result.data.reaction_id
-
-    def unreact(self, message_id, reaction_id):
-        result = self.client.im.v1.message_reaction.delete(
-            DeleteMessageReactionRequest.builder()
-            .message_id(message_id)
-            .reaction_id(reaction_id)
-            .build()
-        )
-        if not result.success():
-            raise RuntimeError(f"Lark unreact failed (code={result.code})")
-
-    def status(self, message_id, text, working=False):
-        """The status line: a reply to the user's message, in its thread. While the turn runs and
-        a loading image is configured, that animated image stands in for the sand clock; if Lark
-        refuses it (a key this app cannot use, say) the same words go out as plain text."""
-        key = self.config.loading_image_key if working else None
-        if key:
+    def open_activity(self, chat, reply_to, key, card, text):
+        image = self.config.loading_image_key
+        if image:
+            with_icon = json.loads(card)
+            with_icon["body"]["elements"][0]["icon"] = {
+                "tag": "custom_icon",
+                "img_key": image,
+            }
             try:
                 sent = self.deliver(
-                    None,
-                    message_id,
-                    "post",
-                    render.status_post(text, key),
-                    str(uuid.uuid4()),
+                    chat,
+                    reply_to,
+                    "interactive",
+                    json.dumps(with_icon),
+                    key,
                     thread=True,
                 )
-                self.remember_status(sent, "post")
-                return sent
-            except RuntimeError as exc:
-                self.loading_image_failed(exc)
-        sent = self.deliver(
-            None, message_id, "text", render.plain(text), str(uuid.uuid4()), thread=True
-        )
-        self.remember_status(sent, "text")
-        return sent
-
-    def remember_status(self, message_id, kind):
-        if self.config.loading_image_key:
-            if (
-                len(self.status_kinds) > 1000
-            ):  # a turn that never ended must not grow this for ever
-                self.status_kinds.clear()
-            self.status_kinds[message_id] = kind
-
-    def loading_image_failed(self, exc):
-        """Reported once per process: every later turn tries the image again, so a passing Lark
-        error costs a turn its animation and nothing else."""
-        if not self.loading_image_reported:
-            self.loading_image_reported = True
-            emit("lark.loading_image_failed", logging.WARNING, reason=str(exc)[:60])
-
-    def note(self, chat, text, reply_to=None):
-        """A step or a sentence of the agent's, as markdown, in the user's thread."""
-        payload = dict(chat=chat, reply_to=reply_to, text=text, card=None, thread=True)
-        return self.send(payload, str(uuid.uuid4()))
-
-    def edit(self, message_id, text, working=False):
-        """Rewrite the status line in the type it was sent as, with the image while the turn runs
-        and without it at the end. A line whose type is not known (the turn began before a
-        restart) tries a post, then text."""
-        key = self.config.loading_image_key
-        kind = self.status_kinds.get(message_id)
-        post = ("post", render.status_post(text, key if working else None))
-        plain = ("text", render.plain(text))
-        attempts = [plain] if not key or kind == "text" else [post]
-        if key and kind is None:
-            attempts.append(plain)
+                return sent, "interactive"
+            except RuntimeError:
+                pass
         try:
-            for msg_type, content in attempts:
-                result = self.update(message_id, msg_type, content)
-                if result.success():
-                    return
-            raise RuntimeError(f"Lark edit failed (code={result.code})")
-        finally:
-            if not working:
-                self.status_kinds.pop(message_id, None)
+            return self.deliver(
+                chat, reply_to, "interactive", card, key, thread=True
+            ), "interactive"
+        except RuntimeError:
+            return self.deliver(
+                chat, reply_to, "post", render.post(text), key, thread=True
+            ), "post"
 
-    def edit_note(self, message_id, text):
-        """Rewrite a step message in place. Steps are sent as markdown posts, so it is a post
-        again; plain text is the fallback, as when sending."""
-        for msg_type, content in (
-            ("post", render.post(text)),
-            ("text", render.plain(text)),
-        ):
-            result = self.update(message_id, msg_type, content)
-            if result.success():
-                return
-        raise RuntimeError(f"Lark edit failed (code={result.code})")
+    def update_activity(self, message_id, kind, card, text):
+        if kind == "interactive":
+            if not self.patch(message_id, card):
+                raise RuntimeError("Lark activity card update failed")
+        elif not self.update(message_id, "post", render.post(text)).success():
+            raise RuntimeError("Lark activity post update failed")
 
     def update(self, message_id, msg_type, content):
         return self.client.im.v1.message.update(
@@ -627,9 +580,9 @@ class Lark:
         items = result.data.items if result.success() and result.data else None
         if not items:
             raise RuntimeError(f"Lark message read failed (code={result.code})")
-        item = next((i for i in items if i.message_id == message_id), items[0])
-        if item.deleted:
-            raise RuntimeError("Lark message was deleted")
+        item = next((i for i in items if i.message_id == message_id), None)
+        if item is None or item.deleted:
+            raise RuntimeError("Lark message was missing or deleted")
         assistant = bool(item.sender and item.sender.sender_type == "app")
         # The conversation this message belongs to, by the rule `session_of` uses for an event.
         session = session_of(item)[0] or ""
@@ -641,7 +594,16 @@ class Lark:
             item.message_id,
             item.mentions or (),
         )
-        return Fetched(inbound.text, assistant, inbound.attachments, session)
+        return Fetched(
+            inbound.text,
+            assistant,
+            inbound.attachments,
+            session,
+            chat_id=item.chat_id or "",
+            sender_id=item.sender.id
+            if item.sender and item.sender.sender_type == "user"
+            else "",
+        )
 
     def thread_messages(self, thread_id, limit=40):
         """The latest messages of a thread, oldest first, written by people (not apps), as dicts with
@@ -660,7 +622,7 @@ class Lark:
             raise RuntimeError(f"Lark thread read failed (code={result.code})")
         found = []
         for item in reversed(result.data.items or []):
-            if item.deleted or not item.sender or item.sender.sender_type == "app":
+            if item.deleted or not item.sender or item.sender.sender_type != "user":
                 continue
             inbound = normalize(
                 item.msg_type,

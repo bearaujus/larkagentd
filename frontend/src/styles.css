@@ -1729,7 +1729,6 @@ tbody > tr:hover {
 }
 .group-brain-toggle,
 .group-brain-capabilities label,
-.group-brain-modes label,
 .group-brain-ack {
   display: flex;
   flex-direction: row;
@@ -1739,7 +1738,6 @@ tbody > tr:hover {
   color: var(--ink);
 }
 .group-brain input[type="checkbox"],
-.group-brain input[type="radio"],
 .group-brain-dialog input[type="checkbox"] {
   width: 18px;
   min-width: 18px;
@@ -1747,8 +1745,7 @@ tbody > tr:hover {
   margin: 0;
   accent-color: var(--blue);
 }
-.group-brain-capabilities,
-.group-brain-modes {
+.group-brain-capabilities {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 22px;
@@ -1757,14 +1754,12 @@ tbody > tr:hover {
   border: 1px solid var(--line);
   border-radius: 6px;
 }
-.group-brain-capabilities legend,
-.group-brain-modes legend {
+.group-brain-capabilities legend {
   padding: 0 4px;
   color: var(--ink);
   font-size: 12px;
   font-weight: 600;
 }
-.group-brain-passive span,
 .group-brain-history span {
   color: #39465b;
   font-size: 12px;

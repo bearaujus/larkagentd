@@ -146,3 +146,42 @@ def load(monkeypatch, **extra):
     for name, value in {**BASE_ENV, **extra}.items():
         monkeypatch.setenv(name, value)
     return Config.load()
+
+
+def test_activity_ignores_streamed_narration_and_deduplicates_tool_ids():
+    from types import SimpleNamespace
+
+    from larkagentd.lark.progress import Progress
+
+    now = [0]
+    opened, updates = [], []
+    transport = SimpleNamespace(
+        open_activity=lambda *args: opened.append(args) or ("already-sent", "post"),
+        update_activity=lambda *args: updates.append(args),
+    )
+    activity = Progress(transport, "chat", "message", clock=lambda: now[0])
+    activity.start()
+    activity.event("started", "lark_file_edit", {"call": "id"})
+    activity.event("started", "lark_file_edit", {"call": "id"})
+    now[0] = 4
+    activity.event("tick")
+    activity.finish(ok=False)
+    activity.finish(ok=False)
+    assert len(opened) == 1 and len(updates) == 2
+    for message, kind, _, text in updates:
+        assert (message, kind) == ("already-sent", "post")
+        assert "1 step" in text
+    assert "Ended early" in updates[-1][3]
+    resumed = Progress(transport, "chat", "message", previous=("already-sent", "post"))
+    resumed.start()
+    resumed.finish()
+    assert len(opened) == 1
+    assert updates[-1][0] == "already-sent"
+
+
+def test_activity_reports_existing_elapsed_time_when_following_a_restarted_session():
+    from larkagentd.lark.progress import Progress
+
+    progress = Progress(None, "chat", "message", prior_elapsed=96, clock=lambda: 10)
+    _, text = progress.render(11, False, "unknown_execution")
+    assert "Session interrupted" in text and "1m 37s" in text

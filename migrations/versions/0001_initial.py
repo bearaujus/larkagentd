@@ -764,9 +764,6 @@ def upgrade():
             "documents_enabled", sa.Boolean(), server_default="true", nullable=False
         ),
         sa.Column(
-            "learning_mode", sa.String(), server_default="explicit", nullable=False
-        ),
-        sa.Column(
             "review_required", sa.Boolean(), server_default="true", nullable=False
         ),
         sa.Column(
@@ -785,10 +782,6 @@ def upgrade():
         sa.Column("updated_by", sa.String(), nullable=True),
         sa.Column("notice_ref", sa.String(), nullable=True),
         sa.Column("policy_ref", sa.String(), nullable=True),
-        sa.CheckConstraint(
-            "learning_mode IN ('explicit', 'interaction', 'passive')",
-            name="gb_settings_mode",
-        ),
         sa.CheckConstraint(
             "state IN ('disabled', 'enabled', 'paused', 'purging')",
             name="gb_settings_state",

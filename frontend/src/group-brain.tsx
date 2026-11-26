@@ -15,7 +15,6 @@ type Draft = {
   configured_enabled: boolean;
   recall: boolean;
   memory: boolean;
-  learning_mode: GroupKnowledge["learning_mode"];
   history_window_days: number;
   notice_ref: string;
   policy_ref: string;
@@ -27,7 +26,6 @@ const reasonWords: Record<string, string> = {
   paused: "Paused by an administrator",
   purging: "Purge is in progress",
   missing_group_notice: "Group notice is missing",
-  missing_scope: "Required access scope is missing",
   visibility_unverified: "Group visibility is not verified",
   embedding_unavailable: "Embedding service is unavailable",
   index_unavailable: "Search index is unavailable",
@@ -37,7 +35,6 @@ const initialDraft = (value: GroupKnowledge): Draft => ({
   configured_enabled: value.configured_enabled,
   recall: value.capabilities.recall,
   memory: value.capabilities.memory,
-  learning_mode: value.learning_mode,
   history_window_days: value.history_window_days,
   notice_ref: value.notice_ref ?? "",
   policy_ref: value.policy_ref ?? "",
@@ -162,7 +159,6 @@ export function GroupBrain({ groupId }: { groupId: string }) {
   const isDirty =
     draft.configured_enabled !== value.configured_enabled ||
     fieldLabels.some(([key]) => draft[key] !== value.capabilities[key]) ||
-    draft.learning_mode !== value.learning_mode ||
     draft.history_window_days !== value.history_window_days ||
     draft.notice_ref !== (value.notice_ref ?? "") ||
     draft.policy_ref !== (value.policy_ref ?? "");
@@ -192,8 +188,6 @@ export function GroupBrain({ groupId }: { groupId: string }) {
       if (draft[key] !== old.capabilities[key])
         changes[`${key}_enabled`] = draft[key];
     }
-    if (draft.learning_mode !== old.learning_mode)
-      changes.learning_mode = draft.learning_mode;
     if (draft.history_window_days !== old.history_window_days)
       changes.history_window_days = draft.history_window_days;
     if (draft.notice_ref !== (old.notice_ref ?? ""))
@@ -341,38 +335,13 @@ export function GroupBrain({ groupId }: { groupId: string }) {
                 </label>
               ))}
             </fieldset>
-            <fieldset className="group-brain-modes" disabled={locked}>
-              <legend>Learning mode</legend>
-              <label>
-                <input
-                  type="radio"
-                  name={`brain-mode-${groupId}`}
-                  value="explicit"
-                  checked={draft.learning_mode === "explicit"}
-                  onChange={() => updateDraft({ learning_mode: "explicit" })}
-                />
-                Explicit
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name={`brain-mode-${groupId}`}
-                  value="interaction"
-                  checked={draft.learning_mode === "interaction"}
-                  onChange={() => updateDraft({ learning_mode: "interaction" })}
-                />
-                Interaction
-              </label>
-              <label className="group-brain-passive">
-                <input
-                  type="radio"
-                  disabled
-                  checked={value.learning_mode === "passive"}
-                  readOnly
-                />
-                Passive <span>Needs a separate approval</span>
-              </label>
-            </fieldset>
+            {draft.memory && (
+              <p className="muted">
+                <strong>Passive learning.</strong> At the end of each turn, the
+                assistant can save a useful fact supported by this group’s
+                messages.
+              </p>
+            )}
             <label className="group-brain-history">
               History window (days)
               <input
@@ -748,15 +717,14 @@ export function GroupBrain({ groupId }: { groupId: string }) {
           >
             <Dialog.Title>Enable group learning?</Dialog.Title>
             <Dialog.Description>
-              The assistant can recall discussions and save facts from cited
-              messages when the corresponding setting is enabled.
+              With collective memory enabled, the assistant can save useful
+              facts from this group after each turn.
             </Dialog.Description>
             <p>
               Only members of this group can retrieve its conversation evidence.
               Source-backed facts can become active automatically. Corrections
               require review.
             </p>
-            <p>Learning mode: {draft.learning_mode}.</p>
             <label>
               Notice reference
               <input

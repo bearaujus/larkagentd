@@ -30,7 +30,6 @@ type Page = {
   group_name: string | null;
   learning: boolean;
   state: string;
-  mode: string;
 };
 
 function LearnedFacts({
@@ -78,9 +77,7 @@ function LearnedFacts({
       </p>
       {page.learning && (
         <p className="muted">
-          {page.mode === "explicit"
-            ? "Learns from cited conversations on request."
-            : "Learning mode: " + page.mode + ". "}{" "}
+          The assistant can save useful facts from this group after each turn.{" "}
           Workspace admins manage learning settings.
         </p>
       )}

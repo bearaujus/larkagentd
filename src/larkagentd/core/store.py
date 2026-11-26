@@ -1135,6 +1135,32 @@ class Store:
         )
         return True
 
+    def note_history_file_links(self, conn, job_id, found, tool, generation=None):
+        """Merge file references observed in a live turn, keeping the most recent 24."""
+        current = conn.execute(
+            select(jobs.c.payload).where(jobs.c.id == job_id).with_for_update()
+        ).scalar_one_or_none()
+        if current is None:
+            return False
+        refs = dict(current.get("lark_history_refs") or {})
+        for url, message_id in found.items():
+            previous = refs.pop(url, None)
+            refs[url] = (
+                previous
+                if generation is not None
+                and previous
+                and previous["generation"] is None
+                else {"message_id": message_id, "tool": tool, "generation": generation}
+            )
+        conn.execute(
+            update(jobs)
+            .where(jobs.c.id == job_id)
+            .values(
+                payload={**current, "lark_history_refs": dict(list(refs.items())[-24:])}
+            )
+        )
+        return True
+
     def end_turn(self, conn, session_id, status):
         conn.execute(
             update(turns).where(turns.c.session_id == session_id).values(status=status)

@@ -33,7 +33,6 @@ export type GroupKnowledge = {
   configured_enabled: boolean;
   effective_state: GroupKnowledgeState;
   reason_codes: string[];
-  learning_mode: "explicit" | "interaction" | "passive";
   capabilities: { recall: boolean; memory: boolean; documents: boolean };
   effective_capabilities: {
     recall: boolean;

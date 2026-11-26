@@ -266,8 +266,10 @@ def test_a_search_that_runs_out_of_pages_before_the_window_starts_says_it_is_par
     )
     source = Spy(
         {
-            ("chat", CHAT, None): page(newest, token="more", complete=False),
-            ("chat", CHAT, "more"): page(newest, token="more", complete=False),
+            ("chat", CHAT, f"page-{i}" if i else None): page(
+                newest, token=f"page-{i + 1}", complete=False
+            )
+            for i in range(MAX_PAGES)
         }
     )
     result = search(store, source, ALICE)
@@ -584,3 +586,55 @@ def test_a_group_that_is_not_registered_is_disabled_and_reads_nothing(store):
     result = group_search_discussions(ctx, dict(query="GTID_PURGED"))
     assert result["status"] == "disabled" and result["reason"] == "not_registered"
     assert source.calls == []
+
+
+def test_recall_retains_matches_when_a_later_page_fails(store):
+    enable(store)
+    _, fix, _ = thread_fixture()
+
+    class LaterPageUnavailable(Spy):
+        def list_messages(self, chat_id, *, page_token=None, limit=50):
+            if page_token:
+                raise SourceError("unavailable")
+            return page(fix, token="next-page", complete=False)
+
+    source = LaterPageUnavailable({("thread", CHAT, "omt_t1", None): page(fix)})
+    result = search(store, source, ALICE)
+    assert result["status"] == "partial"
+    assert result["coverage"]["reason"] == "page_unavailable"
+    assert result["results"][0]["sources"][0]["url"] == fix.link
+
+
+def test_reading_live_discussion_observes_human_file_links_for_that_generation(store):
+    from dataclasses import replace
+
+    enable(store)
+    scope = GROUP
+    url = "https://example.larksuite.com/docx/SyntheticChecklist"
+    source_message = replace(
+        message("om_filepost1234", sender_id=BOB, text=f"Release checklist: {url}"),
+        created_at=datetime.now(timezone.utc),
+    )
+    source = Spy({("chat", CHAT, None): page(source_message)})
+    brain = runtime(store, source)
+    recorded = []
+    ctx = ToolContext(
+        "t:" + ALICE,
+        None,
+        object(),
+        chat_id=CHAT,
+        chat_type="group",
+        group_brain=brain,
+        lark_history_record=lambda *args: recorded.append(args),
+    )
+    found = group_search_discussions(ctx, {"query": "release checklist"})
+    discussion_id = found["results"][0]["discussion_id"]
+    response = group_get_discussion(ctx, {"discussion_id": discussion_id})
+    assert response["status"] == "ok"
+    assert recorded == [
+        (
+            {url: source_message.message_id},
+            "group_get_discussion",
+            brain.effective(scope).generation,
+        )
+    ]

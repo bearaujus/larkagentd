@@ -7,9 +7,15 @@ and token governance before enqueueing and again before starting a queued run. I
 Hermes session to the originator, chat, thread and current credential version. The plugin
 loads the authenticated tool catalog from the tool service at startup and forwards calls
 with the Hermes session. Callers cannot supply a user, group or credential version.
-The tool registry and the group's allowed tool list both apply. Progress omits tool
-arguments in groups. Delivery replies to the originating message, including files and
-confirmation cards. A revoked or erased reply target does not turn into a chat-wide post.
+The tool registry and the group's allowed tool list both apply. The Gateway edits one
+compact activity card with fixed tool labels, elapsed time and outcomes. A recovered turn
+keeps its original timer. The final reply contains the response, any confirmation control,
+and a collapsed usage breakdown. Interrupted runs report the specific outcome in the same
+layout. A single rich post serves as the fallback.
+File downloads use the attachment zone in the final rich-text reply. Lark uses separate
+file messages when a response also needs an interactive confirmation, and account setup
+stays in direct chat.
+A revoked or erased reply target does not turn into a chat-wide post.
 
 The existing usage ledger records settled token usage by model, rate and quota tier.
 Administrators can change the model and supported reasoning effort and set personal and
@@ -36,9 +42,13 @@ Workspace Markdown and attached MCP resources apply to all admitted groups. The 
 Markdown library applies to that group. The administrator supplies MCP endpoints or
 trusted stdio command paths in deployment configuration. The dashboard attaches a named
 resource URI. Retrieval calls only the resource read API. Managed groups can search
-visible Lark history on request. Daily conversations are not passively indexed.
+visible Lark history on request. History queries can start at the oldest visible message,
+continue with Lark's cursor, and cite provider-supplied conversation jump links.
 
-Use a live discussion when a one-off contextual answer is sufficient. Learned records
+With collective memory enabled, the model can nominate one durable fact before it
+finishes a group turn. The Gateway rereads the cited group messages and saves the fact
+after the turn succeeds under the same group policy. Facts are searchable without an
+embedding service. Messages outside assistant turns are searched on request. Learned records
 link to messages re-read by ID in the originating group. A later retrieval compares their
 current sanitized content to the recorded revision and omits records with missing, moved
 or changed sources. Current Lark group owners and admins can retire records in their
@@ -47,8 +57,17 @@ scoped dashboard. Workspace governance and group registration use separate admin
 ## Lark files and confirmation
 
 File tools use an app-only Lark CLI session. The Gateway records links supplied by the
-requester. The tool service checks that the group has the matching grant and the bot has
-effective permission. Existing files keep their owner and collaborators. Creation uses
+requester. A follow-up can also read a link from the requester's earlier live thread message.
+For a file shared earlier by a group member, the assistant finds the link in live
+group history. The tool service rereads the posting before opening it. History
+lookups supply read references only. Each read checks bot access and group visibility. For reads, it also
+accepts organization-only link sharing when both the document and the originating group are
+verified as internal to the same tenant through the receiving app. Editing requires effective
+bot Edit and a group Edit grant when Lark exposes the collaborator list. When Lark withholds
+the list for lack of Share permission, confirmed Docs edits can use the bot's Edit grant
+if the same organization-link check verifies visibility for the group. The requester also
+confirms edits that use a verified earlier link. The tool service rechecks access before
+it executes the edit. Creation uses
 the same app as the Gateway, transfers ownership to the requester, retains bot Manage,
 and grants group Manage. The service releases a link after reading back ownership and grants.
 

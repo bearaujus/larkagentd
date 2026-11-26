@@ -7,7 +7,7 @@ COMPOSE_PROJECT ?= larkagentd
 APP = $(COMPOSE) -p "$(COMPOSE_PROJECT)" --env-file "$(ENV_FILE)" -f compose.yaml
 DB = $(COMPOSE) -p "$(COMPOSE_PROJECT)" $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") -f compose.postgres.yaml
 
-.PHONY: setup env build run stop status logs spawn-db stop-db migrate test lint check ui-build ui-check ui-test
+.PHONY: setup env build run drain stop status logs spawn-db stop-db migrate test lint check ui-build ui-check ui-test
 
 env:
 	@test -e .env || (umask 077 && cp .env.example .env)
@@ -32,9 +32,14 @@ migrate:
 
 run: build
 	@if [ "$(LOCAL_DATABASE)" = true ]; then $(MAKE) spawn-db; fi
+	$(MAKE) drain
 	$(APP) stop gateway toolservice hermes
 	$(MAKE) migrate
 	$(APP) up -d --force-recreate --wait gateway toolservice hermes
+
+drain:
+	@running="$$($(APP) ps --status running -q gateway)" && \
+		if [ -n "$$running" ]; then $(APP) exec -T gateway python - < "src/larkagentd/gateway/drain.py"; fi
 
 stop:
 	$(APP) stop gateway toolservice hermes

@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 
 # Per-group lifecycle. `disabled` is also what a missing settings row means.
 STATES = ("disabled", "enabled", "paused", "purging")
-LEARNING_MODES = ("explicit", "interaction", "passive")
 CAPABILITIES = ("recall", "memory", "documents")
 
 # Why a group is not serving. A list of these is returned next to the effective state.
@@ -15,7 +14,6 @@ REASONS = (
     "paused",
     "purging",
     "missing_group_notice",
-    "missing_scope",
     "visibility_unverified",
     "embedding_unavailable",
     "index_unavailable",
@@ -57,7 +55,6 @@ POLICY_FIELDS = (
     "recall_enabled",
     "memory_enabled",
     "documents_enabled",
-    "learning_mode",
     "history_window_days",
 )
 

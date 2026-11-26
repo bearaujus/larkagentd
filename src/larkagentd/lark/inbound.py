@@ -57,6 +57,8 @@ class Fetched:
     # The session key of the conversation the message belongs to: the thread root, else the thread id,
     # else the message itself (the same rule as `session_of`). Empty when unknown.
     session: str = ""
+    chat_id: str = ""
+    sender_id: str = ""
 
 
 class ResourceTooLarge(RuntimeError):

@@ -1,5 +1,7 @@
 """Activate and retrieve learned records with live Lark source checks."""
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import and_, func, select, tuple_
 
 from .catalog import Catalog
@@ -37,52 +39,62 @@ def read_messages(source, scope, ids):
     }
 
 
-def learn(runtime, scope, owner, args, ids, generation):
-    """Re-read the cited group messages and attach their persisted revisions."""
-    if not ids or len(ids) > 8:
-        return {"status": "source_unavailable"}
+def verify_candidate(runtime, scope, owner, candidate):
+    """Read the proposed evidence live before acquiring any database locks."""
+    ids = candidate["ids"]
     live = live_messages(runtime, scope, ids)
     if set(live) != set(ids):
-        return {"status": "source_unavailable"}
-    # New interactive facts can use lexical retrieval without an embedding provider.
-    # An existing optional index remains available to the legacy document/index worker.
-    with runtime.connection() as conn:
-        store.row(conn, scope, lock=True)
-        state = effective(conn, runtime.config, scope)
-        if not state.allows("memory") or state.generation != generation:
-            return {"status": "disabled"}
-        Catalog().upsert_messages(
-            conn,
-            scope,
-            live.values(),
-            retention_days=runtime.config.source_retention_days,
+        return None
+    if candidate["current_only"] and live[ids[0]].sender_id != owner:
+        return None
+    oldest = datetime.now(timezone.utc) - timedelta(
+        days=runtime.config.source_retention_days
+    )
+    if any(message.created_at <= oldest for message in live.values()):
+        return None
+    sources = [sanitize(message.text) for message in live.values()]
+    if any(source.reasons or not source.text for source in sources):
+        return None
+    if not any(candidate["evidence"] in source.text for source in sources):
+        return None
+    return live
+
+
+def activate_candidate(conn, runtime, scope, owner, args, live, generation):
+    """Activate one grounded fact with the successful turn, using lexical retrieval."""
+    store.row(conn, scope, lock=True)
+    state = effective(conn, runtime.config, scope)
+    if not state.allows("memory") or state.generation != generation:
+        return "disabled"
+    Catalog().upsert_messages(
+        conn, scope, live.values(), retention_days=runtime.config.source_retention_days
+    )
+    memory = Memory()
+    result = memory.propose(conn, scope, owner, args["content"], args["category"], live)
+    if result.get("duplicate"):
+        return "duplicate"
+    if not result.get("memory_id"):
+        return "invalid_request"
+    digest = conn.scalar(
+        select(gb_memory_revisions.c.content_hash).where(
+            gb_memory_revisions.c.group_key == scope,
+            gb_memory_revisions.c.memory_id == result["memory_id"],
+            gb_memory_revisions.c.revision == result["revision"],
         )
-        memory = Memory()
-        result = memory.propose(
-            conn, scope, owner, args["content"], args["category"], ids
-        )
-        if not result.get("memory_id") or result.get("duplicate"):
-            return {"status": "ok", **result}
-        digest = conn.scalar(
-            select(gb_memory_revisions.c.content_hash).where(
-                gb_memory_revisions.c.group_key == scope,
-                gb_memory_revisions.c.memory_id == result["memory_id"],
-                gb_memory_revisions.c.revision == result["revision"],
-            )
-        )
-        activated = memory.approve(
-            conn,
-            scope,
-            result["memory_id"],
-            result["revision"],
-            digest,
-            "verified_group_source",
-            True,
-        )
-        if activated.get("status") != "active":
-            return {"status": "source_unavailable"}
-        store.audit(conn, scope, owner, "memory_learned", target_id=result["memory_id"])
-        return {"status": "ok", **result, "state": "active"}
+    )
+    activated = memory.approve(
+        conn,
+        scope,
+        result["memory_id"],
+        result["revision"],
+        digest,
+        "verified_group_source",
+        True,
+    )
+    if activated.get("status") != "active":
+        raise RuntimeError("Memory activation failed")
+    store.audit(conn, scope, owner, "memory_learned", target_id=result["memory_id"])
+    return "saved"
 
 
 def references(conn, scope, memory_id, revision):

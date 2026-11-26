@@ -51,7 +51,7 @@ def test_missing_reader_and_upstream_forbidden_use_fixed_tool_errors(tmp_path):
     reader = LarkReader(
         ("lark-cli",), "app", "secret", tmp_path, run=lambda *a, **k: Failed()
     )
-    with pytest.raises(ToolError, match="forbidden"):
+    with pytest.raises(LarkError, match="forbidden"):
         TOOLS["lark_thread"].run(
             ToolContext(
                 "t:u",
@@ -169,3 +169,71 @@ def test_reader_validates_server_ids_and_page_token(tmp_path):
             reader.thread(bad_id)
     with pytest.raises(LarkError, match="bad_page_token"):
         reader.chat("oc_abcdefgh", "bad token")
+
+
+def test_first_group_history_and_followup_cursor_keep_native_thread_link(tmp_path):
+    cursor = "ab_" * 41 + "xyz=="
+    chat_id = "oc_abcdefgh"
+    thread_id = "omt_abcdefgh"
+    url = (
+        f"https://applink.larksuite.com/client/thread/open?open_chat_id={chat_id}"
+        f"&open_thread_id={thread_id}&thread_position=2"
+    )
+    commands = []
+
+    def run(argv, **kwargs):
+        commands.append(argv)
+        first = len(commands) == 1
+        rows = [
+            {
+                "chat_id": chat_id,
+                "create_time": "2026-01-01 00:00",
+                "msg_type": "text",
+                "content": {
+                    "text": "First visible message" if first else "Second message"
+                },
+                "sender": {"name": "Verified Sender", "sender_type": "user"},
+                "message_app_link": url,
+            }
+        ]
+        return type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stderr": "",
+                "stdout": json.dumps(
+                    {
+                        "data": {
+                            "messages": rows,
+                            "has_more": first,
+                            "page_token": cursor if first else None,
+                        }
+                    }
+                ),
+            },
+        )()
+
+    ctx = ToolContext(
+        "t:reader",
+        None,
+        object(),
+        lark=LarkReader(("lark-cli",), "app", "secret", tmp_path, run=run),
+        conversation={"chat": chat_id, "in_thread": True, "thread": thread_id},
+    )
+    options = {"scope": "chat", "order": "asc", "limit": 1, "show_names": True}
+    run_tool = TOOLS["lark_thread"].run
+    first = run_tool(ctx, options)
+    assert first["messages"] == [
+        {
+            "person": "Verified Sender",
+            "text": "First visible message",
+            "time": "2026-01-01 00:00",
+            "url": url,
+        }
+    ]
+    assert first["next_page_token"] == cursor
+    second = run_tool(ctx, {**options, "page_token": first["next_page_token"]})
+    assert second["messages"][0]["text"] == "Second message"
+    assert all("+chat-messages-list" in argv and "asc" in argv for argv in commands)
+    assert commands[1][commands[1].index("--page-token") + 1] == cursor

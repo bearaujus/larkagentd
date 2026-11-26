@@ -206,3 +206,43 @@ def test_a_forwarded_conversation_is_read_and_a_failure_is_a_note():
     resolved = resolve(lark, dict(forwards=["f1", "f2"]))
     assert resolved.forwarded == ["Person 1: hi"]
     assert resolved.notes == ["A forwarded conversation could not be read."]
+
+
+def test_thread_references_are_from_requester_before_current_message():
+    document = "https://example.larksuite.com/docx/ExampleDocumentToken"
+    other = "https://example.larksuite.com/docx/OtherDocumentToken"
+    transport = FakeLark(
+        messages={
+            "quote": Fetched(other, chat_id="other-chat", sender_id="person"),
+            "root": Fetched(other, chat_id="group", sender_id="other"),
+        }
+    )
+    payload = dict(
+        group=True,
+        in_thread=True,
+        chat="group",
+        thread="root",
+        reply_to="quote",
+        message_id="current",
+        text="Try again?",
+    )
+    remote = [
+        {"message_id": "previous", "owner": "tenant:person", "text": document},
+        {"message_id": "other", "owner": "tenant:other", "text": other},
+        {"message_id": "current", "owner": "tenant:person", "text": ""},
+        {"message_id": "later", "owner": "tenant:person", "text": other},
+    ]
+    result = resolve(
+        transport, payload, True, owner="tenant:person", remote=remote, lark_thread=True
+    )
+    assert [link.url for link in result.lark_thread_links] == [document]
+    assert not result.lark_allowed
+    missing_anchor = resolve(
+        transport,
+        payload,
+        True,
+        owner="tenant:person",
+        remote=remote[:2],
+        lark_thread=True,
+    )
+    assert not missing_anchor.lark_thread_links

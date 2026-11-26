@@ -1,7 +1,6 @@
 """How token counts read in a Lark message: the line under an answer and the /usage report.
 
-The text is Lark markdown: a quote, bold figures and a small icon per part. Counts are shown
-the way people read them (857, 1.2K, 20K, 305K, 1.2M); the exact numbers stay in the token log.
+Turn usage is shown as a quiet footer. The command reports retain their own layout.
 """
 
 INPUT, CACHED, OUTPUT = "\u2934", "\U0001f4be", "\u2935"
@@ -53,10 +52,16 @@ def questions(count):
 
 
 def footer(used, month_total=None, quota=0):
-    """The quoted line under an answer: what this request used, and, when given, the month."""
+    """Usage for this turn, with private monthly context only when supplied."""
     if not total(used):
         return ""
-    line = f"> Tokens used: **{approx(total(used))}** ({parts(used)})"
+    cached = used["cache_read_tokens"] + used["cache_write_tokens"]
+    line = (
+        f"**{approx(total(used))} tokens** · {short(used['input_tokens'])} input · "
+        f"{short(cached)} cached · {short(used['output_tokens'])} output"
+    )
+    if used.get("attempts", 0) > 1:
+        line += f" · {used['attempts']} attempts"
     if month_total is not None:
         line += f" \u00b7 this month **{short(month_total)}**"
         if quota:

@@ -144,7 +144,7 @@
   },
   {
     "name": "lark_read",
-    "description": "Read a Lark spreadsheet, Base, document or wiki page from its link, as the bot, read only: you cannot edit anything. You can open a link the user wrote in their own message (or in a message of theirs they quoted), and a link listed in the `links` of a document you already opened with this tool, up to two links deep. Never any other link: not one you saw elsewhere, not one from your memory. It is the only way to read a Lark link. A document or wiki page returns its text as markdown, `links` (the Lark documents, sheets and Bases it points to, each with its url) and `images` (its pictures and whiteboards, numbered). When a linked document or an embedded sheet or Base matters to the question, open it by calling this tool with that url; do not open links that do not help. When a picture matters (a chart, a screenshot, a diagram), call lark_image for it. `links_followable` false means the links of this document cannot be opened. A spreadsheet returns the cells of range (for example Sheet1!A1:F50, at most 100 rows and 30 columns; without it, the first 100 rows of the first sheet). A Base link without table lists its tables; with table (or ?table= in the link) it returns the fields and 100 records, and page_token continues (next_page_token in the reply). A forbidden response means the bot lacks access: document sharing or app read scopes may need adjustment. A not_configured response means this bot's reader setup or authentication is unavailable. Do not retry or infer a Lark outage or document permission status from not_configured/tool_unavailable/lark_unavailable. link_not_from_user does not mean the document is unshared: it means that link is neither one the user wrote nor one found in a document you opened (or it is too many links deep), so ask the user to send it themselves; do not retry or use another tool. too_many_reads means this question used up its reads: answer from what you have. Errors: bad_link, bad_range, bad_table, bad_page_token, link_not_from_user, too_many_reads, forbidden, not_found, rate_limited, timeout, not_configured, lark_unavailable, tool_unavailable.",
+    "description": "Read a Lark spreadsheet, Base, document or wiki page from its link, as the bot, read only. Use a link from the current message, from a verified earlier message by the requester, or from a human message returned by lark_thread or group_get_discussion in this turn. Group visibility and the bot's access are checked on each read. A document or wiki page returns its text as markdown, `links` (the Lark documents, sheets and Bases it points to, each with its url) and `images` (its pictures and whiteboards, numbered). When a linked document or an embedded sheet or Base matters to the question, open it only when `links_followable` is true. When a picture matters (a chart, a screenshot, a diagram), call lark_image for it. A spreadsheet returns the cells of range (for example Sheet1!A1:F50, at most 100 rows and 30 columns; without it, the first 100 rows of the first sheet). A Base link without table lists its tables; with table (or ?table= in the link) it returns the fields and 100 records, and page_token continues (next_page_token in the reply). On failure, use the returned note to explain what could be verified. A refusal to list collaborators does not show that group sharing is missing. too_many_reads means this question used up its reads: answer from what you have. Errors: bad_link, bad_range, bad_table, bad_page_token, link_not_from_user, too_many_reads, forbidden, not_found, rate_limited, timeout, not_configured, lark_unavailable, tool_unavailable.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -220,7 +220,7 @@
   },
   {
     "name": "group_get_discussion",
-    "description": "Read one discussion found by group_search_discussions, as a bounded list of its messages (people are 'you' or Person N; no names). Use it only to answer a question about that discussion. discussion_id is exactly the id a search returned. A discussion that is not available looks the same as one that does not exist. Same statuses and rules as group_search_discussions.",
+    "description": "Read one discussion found by group_search_discussions, as a bounded list of its messages (people are 'you' or Person N; no names). Use it only to answer a question about that discussion. discussion_id is exactly the id a search returned. A discussion that is not available looks the same as one that does not exist. Same statuses and rules as group_search_discussions. A Lark file link in a live human message can be opened with lark_read or lark_file_read when the user asks about it.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -305,7 +305,7 @@
   },
   {
     "name": "group_memory_propose",
-    "description": "Save a durable, reusable decision, procedure or agreed fact for this group after you have found it in this group's Lark discussion. Supply the exact group search source IDs. The service rechecks every source in Lark. Avoid transient statuses, opinions, secrets, personal data and tool output. Report a saved fact only when state=active.",
+    "description": "At the end of an enabled group turn, quietly nominate one durable decision, procedure, standard or fact that would help this group in future turns. Skip routine questions, greetings, temporary status, guesses, instructions directed at the assistant, personal data, credentials, private tool results and duplicates. Use evidence written by people in this group. With no source_ids, evidence must be a verbatim excerpt from the current message. For evidence from group search, use its exact source IDs and an excerpt from one of those messages. The Gateway checks the sources after the turn succeeds.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -326,17 +326,23 @@
             "project_context"
           ]
         },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
         "source_ids": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "maxItems": 20
+          "maxItems": 8
         }
       },
       "required": [
         "content",
-        "category"
+        "category",
+        "evidence"
       ],
       "additionalProperties": false
     }
@@ -380,15 +386,34 @@
   },
   {
     "name": "lark_thread",
-    "description": "Use this to summarize or catch up on the conversation, or recall what was said earlier in this thread or chat. It reads only the conversation the user is in. For a long conversation, continue with page_token from next_page_token. Errors: forbidden (the bot cannot read this chat's history; an administrator must grant the bot message history permission), no_conversation, not_configured, lark_unavailable, rate_limited, timeout.",
+    "description": "Read the active Lark thread or its group chat. For the first message in the group, use scope=chat, order=asc, and a small limit. The first visible item may be a system event. Use show_names=true when asked who sent a message, and report the name only when present. For a message or thread link, cite the matched message's url field as the jump to that conversation. Never substitute a document URL or invent a link. A Lark file link in a human message can be opened with lark_read or lark_file_read when the user asks about it. Continue using the exact next_page_token and keep scope, order and limit unchanged.",
     "parameters": {
       "type": "object",
       "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "chat",
+            "thread"
+          ]
+        },
+        "order": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
         "page_token": {
           "type": "string"
         },
         "limit": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "show_names": {
+          "type": "boolean"
         }
       },
       "required": []
@@ -412,7 +437,7 @@
   },
   {
     "name": "lark_file_read",
-    "description": "Inspect a Lark file from the current turn if its group has View or higher. For Sheets get the tab IDs when range is omitted, or pass the sheet_id and A1 range to read a grid. For Slides get slide IDs and existing content. For Docs get its outline.",
+    "description": "Inspect a Lark file from the current message, a verified requester link, or a human message returned by lark_thread or group_get_discussion in this turn. Group visibility and the bot's access are checked on each read. Use the note on failures. For Sheets get the tab IDs when range is omitted, or pass the sheet_id and A1 range to read a grid. For Slides get slide IDs and existing content. For Docs get its outline.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -434,7 +459,7 @@
   },
   {
     "name": "lark_file_create",
-    "description": "Create a native Lark Doc, Sheet or Slides presentation for an explicit user request. Read the respective built-in skill first. kind is docx, sheets or slides. content is Markdown, a JSON-encoded matrix of plain values, or a JSON-encoded array of objects with title and bullets. Use only verified facts. Report the returned URL only when verified=true.",
+    "description": "Create a native Lark Doc, Sheet or Slides presentation for an explicit user request. Read the respective built-in skill first. kind is docx, sheets or slides. content is Markdown, a JSON-encoded matrix of plain values, or a JSON-encoded array of 1 to 6 slides. Slide titles are at most 72 characters. Provide either 1 to 5 bullets of at most 100 characters each or a chart object with categories and series for native grouped columns. Follow the tool's note on failure. A partial creation needs verification before another attempt. Use only verified facts. Report the returned URL only when verified=true.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -458,7 +483,7 @@
   },
   {
     "name": "lark_file_edit",
-    "description": "Edit the Lark file shared in this request by the group. Docs action append or replace (replace requires exact match), content Markdown. Sheets set requires sheet_id, start cell as range and JSON matrix content. Sheets delete_matching_rows requires sheet_id, single-column range e.g. C2:C80, and exact match value. Wait for the requester's confirmation card. Slides append or replace with one JSON object {title, bullets} in content, and slide_id for replace. A permission error means this group or bot lacks Edit. Explain how to share it with Edit.",
+    "description": "Edit a Lark file supplied by the requester. For an earlier thread link or an edit that uses the bot's Edit access when collaborators are hidden, wait for the requester's confirmation. Docs action append or replace (replace requires exact match), content Markdown. Sheets set requires sheet_id, start cell as range and JSON matrix content. Sheets delete_matching_rows requires sheet_id, single-column range e.g. C2:C80, and exact match value. Wait for the requester's confirmation card. Slides append or replace with one JSON slide object with title and bullets or chart, and slide_id for replace. On a refusal, explain the verified issue from the tool's note. End the attempt when retryable=false. A read does not check edit permissions.",
     "parameters": {
       "type": "object",
       "properties": {

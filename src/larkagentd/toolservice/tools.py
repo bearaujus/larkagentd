@@ -13,6 +13,7 @@ from typing import Any, Callable
 from ..core.auth import AuthError
 from ..core.diagnostics import emit
 from ..core.googlelinks import parse_link as parse_google_link
+from ..lark.links import parse_link as parse_document_link
 from ..skills.skills import SkillError
 from . import work_tools
 from .gitlab import GitlabError
@@ -43,6 +44,7 @@ from .groupbrain_memory import (
     group_memory_correct,
     group_memory_propose,
 )
+from .historyfiles import observe_file_links, verify_history_file
 from .larkcli import LarkError, parse_link
 
 
@@ -66,8 +68,11 @@ class ToolContext:
     lark: Any = None
     google: Any = None
     google_allowed: Any = frozenset()
-    # The document tokens the user wrote in this turn's message; `lark_read` opens nothing else.
+    # Tokens supplied by the requester. Read tools also get verified thread references.
     lark_allowed: Any = frozenset()
+    lark_thread_allowed: Any = frozenset()
+    lark_history_refs: Any = None
+    lark_history_record: Callable[..., Any] | None = None
     # Documents found inside documents read in this turn (token to links away from the user's own),
     # how many reads this turn has spent, and how to record more.
     lark_found: Any = None
@@ -283,26 +288,24 @@ def lark_read(ctx, arguments):
     if reader is None:
         raise ToolError("not_configured")
     url = arguments["url"]
-    try:
-        kind, token = parse_link(url)[:2]
-        depth = lark_depth(ctx, token)
-        if depth is None:
-            raise ToolError("link_not_from_user")
-        if ctx.lark_reads >= LARK_MAX_READS:
-            raise ToolError("too_many_reads")
-        if ctx.chat_type == "group":
-            work_tools.require_group_share(ctx, url)
-        if kind in ("docx", "wiki"):
-            result = reader.doc(url)
-        elif kind == "sheet":
-            result = reader.sheet(url, arguments.get("range"))
-        else:
-            result = reader.base(
-                url, arguments.get("table"), arguments.get("page_token")
+    kind, token = parse_link(url)[:2]
+    if ctx.lark_reads >= LARK_MAX_READS:
+        raise ToolError("too_many_reads")
+    depth = lark_depth(ctx, token)
+    if depth is None:
+        if not verify_history_file(ctx, parse_document_link(url)):
+            raise LarkError(
+                "link_not_from_user", stage="link_provenance", access="view"
             )
-    except LarkError as exc:
-        emit("lark.failed", logging.WARNING, reason=str(exc))
-        raise ToolError(str(exc)) from None
+        depth = 0
+    if ctx.chat_type == "group":
+        work_tools.require_group_share(ctx, url)
+    if kind in ("docx", "wiki"):
+        result = reader.doc(url)
+    elif kind == "sheet":
+        result = reader.sheet(url, arguments.get("range"))
+    else:
+        result = reader.base(url, arguments.get("table"), arguments.get("page_token"))
     found = {}
     follow = getattr(reader, "follow_links", True)
     if "links" in result:
@@ -329,20 +332,18 @@ def lark_image(ctx, arguments):
     reader = ctx.lark
     if reader is None:
         raise ToolError("not_configured")
-    try:
-        kind, token = parse_link(arguments["url"])[:2]
-        if kind not in ("docx", "wiki"):
-            raise LarkError("bad_link")
-        if lark_depth(ctx, token) is None:
-            raise ToolError("link_not_from_user")
-        if ctx.lark_reads >= LARK_MAX_READS:
-            raise ToolError("too_many_reads")
-        if ctx.chat_type == "group":
-            work_tools.require_group_share(ctx, arguments["url"])
-        result = reader.images(arguments["url"], arguments["numbers"])
-    except LarkError as exc:
-        emit("lark.failed", logging.WARNING, reason=str(exc))
-        raise ToolError(str(exc)) from None
+    kind, token = parse_link(arguments["url"])[:2]
+    if kind not in ("docx", "wiki"):
+        raise LarkError("bad_link")
+    if ctx.lark_reads >= LARK_MAX_READS:
+        raise ToolError("too_many_reads")
+    if lark_depth(ctx, token) is None and not verify_history_file(
+        ctx, parse_document_link(arguments["url"])
+    ):
+        raise LarkError("link_not_from_user", stage="link_provenance", access="view")
+    if ctx.chat_type == "group":
+        work_tools.require_group_share(ctx, arguments["url"])
+    result = reader.images(arguments["url"], arguments["numbers"])
     if ctx.lark_record is not None:
         ctx.lark_record({}, 1)
     return {**result, "kind": kind, "notice": LARK_NOTICE}
@@ -353,28 +354,36 @@ def lark_thread(ctx, arguments):
     if reader is None:
         raise ToolError("not_configured")
     conversation = ctx.conversation or {}
-    thread_id = conversation.get("thread")
-    try:
-        if conversation.get("in_thread") is True:
-            if not isinstance(thread_id, str):
-                raise LarkError("no_conversation")
-            return reader.thread(
-                thread_id,
-                arguments.get("page_token"),
-                arguments.get("limit", 50),
-                asker=ctx.owner.split(":", 1)[-1],
-            )
-        chat_id = conversation.get("chat")
+    scope = arguments.get(
+        "scope", "thread" if conversation.get("in_thread") else "chat"
+    )
+    if scope not in ("chat", "thread"):
+        raise ToolError("bad_arguments")
+    order = arguments.get("order", "asc" if scope == "thread" else "desc")
+    chat_id = conversation.get("chat")
+    cursor, limit = arguments.get("page_token"), arguments.get("limit", 50)
+    asker = ctx.owner.split(":", 1)[-1]
+    found = {}
+    options = dict(
+        asker=asker,
+        order=order,
+        show_names=arguments.get("show_names", False),
+        observe_files=lambda message_id, text: observe_file_links(
+            found, message_id, text
+        ),
+    )
+    if scope == "thread":
+        thread_id = conversation.get("thread_ref") or conversation.get("thread")
+        if not conversation.get("in_thread") or not isinstance(thread_id, str):
+            raise ToolError("no_conversation")
+        result = reader.thread(thread_id, cursor, limit, chat_id=chat_id, **options)
+    else:
         if not isinstance(chat_id, str):
-            raise LarkError("no_conversation")
-        return reader.chat(
-            chat_id,
-            arguments.get("page_token"),
-            arguments.get("limit", 50),
-            asker=ctx.owner.split(":", 1)[-1],
-        )
-    except LarkError as exc:
-        raise ToolError(str(exc)) from None
+            raise ToolError("no_conversation")
+        result = reader.chat(chat_id, cursor, limit, **options)
+    if found and ctx.lark_history_record:
+        ctx.lark_history_record(found, "lark_thread")
+    return result
 
 
 def skills_of(ctx):
@@ -538,27 +547,20 @@ TOOLS = {
             name="lark_read",
             description=(
                 "Read a Lark spreadsheet, Base, document or wiki page from its link, as the bot, read "
-                "only: you cannot edit anything. You can open a link the user wrote in their own message "
-                "(or in a message of theirs they quoted), and a link listed in the `links` of a document "
-                "you already opened with this tool, up to two links deep. Never any other link: not one "
-                "you saw elsewhere, not one from your memory. It is the only way to read a Lark link. "
+                "only. Use a link from the current message, from a verified earlier message by the "
+                "requester, or from a human message returned by lark_thread or group_get_discussion "
+                "in this turn. Group visibility and the bot's access are checked on each read. "
                 "A document or wiki page returns its text as markdown, `links` (the Lark documents, "
                 "sheets and Bases it points to, each with its url) and `images` (its pictures and "
                 "whiteboards, numbered). When a linked document or an embedded sheet or Base matters to "
-                "the question, open it by calling this tool with that url; do not open links that do not "
-                "help. When a picture matters (a chart, a screenshot, a diagram), call lark_image for it. "
-                "`links_followable` false means the links of this document cannot be opened. A spreadsheet "
+                "the question, open it only when `links_followable` is true. When a picture matters "
+                "(a chart, a screenshot, a diagram), call lark_image for it. A spreadsheet "
                 "returns the cells of range (for example Sheet1!A1:F50, at "
                 "most 100 rows and 30 columns; without it, the first 100 rows of the first sheet). A "
                 "Base link without table lists its tables; with table (or ?table= in the link) it "
                 "returns the fields and 100 records, and page_token continues (next_page_token in the "
-                "reply). A forbidden response means the bot lacks access: document sharing or app read "
-                "scopes may need adjustment. A not_configured response means this bot's reader setup or "
-                "authentication is unavailable. Do not retry or infer a Lark outage or document "
-                "permission status from not_configured/tool_unavailable/lark_unavailable. "
-                "link_not_from_user does not mean the document is unshared: it means that link is neither "
-                "one the user wrote nor one found in a document you opened (or it is too many links "
-                "deep), so ask the user to send it themselves; do not retry or use another tool. "
+                "reply). On failure, use the returned note to explain what could be verified. "
+                "A refusal to list collaborators does not show that group sharing is missing. "
                 "too_many_reads means this question used up its reads: answer from what you have. "
                 "Errors: bad_link, bad_range, bad_table, "
                 "bad_page_token, link_not_from_user, too_many_reads, forbidden, not_found, rate_limited, "
@@ -657,18 +659,23 @@ TOOLS = {
         Tool(
             name="lark_thread",
             description=(
-                "Use this to summarize or catch up on the conversation, or recall what was "
-                "said earlier in this thread or chat. It reads only the conversation the "
-                "user is in. For a long conversation, continue with page_token from "
-                "next_page_token. Errors: forbidden (the bot cannot read this chat's history; "
-                "an administrator must grant the bot message history permission), "
-                "no_conversation, not_configured, lark_unavailable, rate_limited, timeout."
+                "Read the active Lark thread or its group chat. For the first message in the group, "
+                "use scope=chat, order=asc, and a small limit. The first visible item may be a system "
+                "event. Use show_names=true when asked who sent a message, and report the name only "
+                "when present. For a message or thread link, cite the matched message's url field "
+                "as the jump to that conversation. Never substitute a document URL or invent a link. "
+                "A Lark file link in a human message can be opened with lark_read or lark_file_read "
+                "when the user asks about it. Continue using the exact next_page_token and keep "
+                "scope, order and limit unchanged."
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "scope": {"type": "string", "enum": ["chat", "thread"]},
+                    "order": {"type": "string", "enum": ["asc", "desc"]},
                     "page_token": {"type": "string"},
-                    "limit": {"type": "integer"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "show_names": {"type": "boolean"},
                 },
                 "required": [],
             },
@@ -721,7 +728,9 @@ TOOLS.update(
         ),
         work_tool(
             "lark_file_read",
-            "Inspect a Lark file from the current turn if its group has View or higher. "
+            "Inspect a Lark file from the current message, a verified requester link, "
+            "or a human message returned by lark_thread or group_get_discussion in this turn. "
+            "Group visibility and the bot's access are checked on each read. Use the note on failures. "
             "For Sheets get the tab IDs when range is omitted, or pass the sheet_id and A1 range "
             "to read a grid. For Slides get slide IDs and existing content. For Docs get its outline.",
             ("url",),
@@ -731,18 +740,24 @@ TOOLS.update(
             "lark_file_create",
             "Create a native Lark Doc, Sheet or Slides presentation for an explicit user request. "
             "Read the respective built-in skill first. kind is docx, sheets or slides. content is "
-            "Markdown, a JSON-encoded matrix of plain values, or a JSON-encoded array of objects with title and bullets. "
+            "Markdown, a JSON-encoded matrix of plain values, or a JSON-encoded array of 1 to 6 slides. "
+            "Slide titles are at most 72 characters. Provide either 1 to 5 bullets of at most 100 characters each "
+            "or a chart object with categories and series for native grouped columns. "
+            "Follow the tool's note on failure. A partial creation needs verification before another attempt. "
             "Use only verified facts. Report the returned URL only when verified=true.",
             ("kind", "title", "content"),
         ),
         work_tool(
             "lark_file_edit",
-            "Edit the Lark file shared in this request by the group. Docs action append or replace "
+            "Edit a Lark file supplied by the requester. For an earlier thread link or an "
+            "edit that uses the bot's Edit access when collaborators are hidden, wait for "
+            "the requester's confirmation. Docs action append or replace "
             "(replace requires exact match), content Markdown. Sheets set requires sheet_id, start cell "
             "as range and JSON matrix content. Sheets delete_matching_rows requires sheet_id, single-column "
             "range e.g. C2:C80, and exact match value. Wait for the requester's confirmation card. "
-            "Slides append or replace with one JSON object {title, bullets} in content, and slide_id for replace. "
-            "A permission error means this group or bot lacks Edit. Explain how to share it with Edit.",
+            "Slides append or replace with one JSON slide object with title and bullets or chart, and slide_id for replace. "
+            "On a refusal, explain the verified issue from the tool's note. End the attempt when "
+            "retryable=false. A read does not check edit permissions.",
             ("url", "action"),
             ("content", "match", "range", "sheet_id", "slide_id"),
         ),

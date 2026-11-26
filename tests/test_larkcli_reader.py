@@ -249,11 +249,13 @@ def test_credentials_only_in_child_config_and_environment_is_minimal(
     monkeypatch.setenv("DATABASE_URL", "decoy-database")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "decoy-key")
     monkeypatch.setenv("LARK_USER_TOKEN", "decoy-token")
+    monkeypatch.setenv("TZ", "Asia/Jakarta")
     service, fake, _ = reader(tmp_path)
     service.doc(DOC)
     argv, options = fake.calls[0]
     assert "REDACTED_TEST_VALUE" not in argv
-    assert set(options["env"]) == {"PATH", "HOME"}
+    assert set(options["env"]) == {"PATH", "HOME", "TZ"}
+    assert options["env"]["TZ"] == "UTC"
     assert options["env"]["HOME"] == os.fspath(tmp_path / "home")
     assert (
         not {"DATABASE_URL", "AWS_SECRET_ACCESS_KEY", "LARK_USER_TOKEN"}
@@ -330,6 +332,7 @@ def test_fixed_cli_error_mapping_does_not_leak_output_or_stderr(tmp_path, caplog
                 "error": {
                     "type": "authorization",
                     "subtype": subtype,
+                    "code": 1063004 if subtype == "permission_denied" else "private ID",
                     "message": "private title and URL",
                 },
             }
@@ -345,6 +348,9 @@ def test_fixed_cli_error_mapping_does_not_leak_output_or_stderr(tmp_path, caplog
         with pytest.raises(LarkError) as caught:
             service.doc(DOC)
         assert str(caught.value) == code
+        assert caught.value.provider_code == (
+            1063004 if subtype == "permission_denied" else None
+        )
         assert (
             "private title" not in str(caught.value)
             and "private title" not in caplog.text

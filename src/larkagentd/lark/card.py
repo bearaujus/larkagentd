@@ -11,7 +11,7 @@ import io
 import json
 from collections import namedtuple
 
-from .render import cells, shorten
+from .render import cells, close_fence, shorten
 
 PAGE_ROWS = 10
 MAX_COLUMNS = 50
@@ -120,9 +120,11 @@ def notes(parts, shown, cap, copy_left_out):
     return lines
 
 
-def build(answer, parts, shown, cap, copies=False):
+def build(answer, parts, shown, cap, copies=False, *, footer="", confirmation=None):
     """The card; `copies` is True (add copy blocks), False (none) or "left out" (say so)."""
-    elements = [{"tag": "markdown", "content": shorten(answer, ANSWER_CHARS)}]
+    elements = [
+        {"tag": "markdown", "content": close_fence(shorten(answer, ANSWER_CHARS))}
+    ]
     for part, count in zip(parts, shown):
         elements.append(table_element(part, count, cap))
     lines = notes(parts, shown, cap, copies == "left out")
@@ -130,15 +132,125 @@ def build(answer, parts, shown, cap, copies=False):
         elements.append({"tag": "markdown", "content": "\n".join(lines)})
     if copies is True:
         elements.extend(copy_element(part) for part in parts)
+    return reply_layout(elements, footer, confirmation, title="Table preview")
+
+
+def text(value):
+    return {"tag": "plain_text", "content": value}
+
+
+def header(title, color="grey"):
+    return {"title": text(title), "template": color}
+
+
+def details_panel(title, content, *, expanded=False):
     return {
-        "schema": "2.0",
-        "config": {"update_multi": True},
-        "header": {"title": {"tag": "plain_text", "content": "Table preview"}},
-        "body": {"elements": elements},
+        "tag": "collapsible_panel",
+        "expanded": expanded,
+        "header": {"title": text(title)},
+        "elements": [{"tag": "markdown", "content": content, "text_size": "notation"}],
     }
 
 
-def preview_card(answer, previews, budget=BUDGET):
+def activity_card(status, lines, *, expanded):
+    elements = [{"tag": "markdown", "content": status}]
+    if lines:
+        elements.append(
+            details_panel(
+                "Tool activity",
+                "\n".join(f"- {line}" for line in lines),
+                expanded=expanded,
+            )
+        )
+    return json.dumps(
+        {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "body": {"elements": elements},
+        },
+        ensure_ascii=False,
+    )
+
+
+def reply_layout(elements, footer, confirmation, title=None):
+    if confirmation:
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {"tag": "div", "text": text(confirmation["label"])},
+                {
+                    "tag": "button",
+                    "text": text("Confirm"),
+                    "type": "primary",
+                    "behaviors": [{"type": "callback", "value": confirmation["value"]}],
+                },
+            ]
+        )
+    if footer:
+        headline, _, counts = footer.partition(" · ")
+        elements.append(details_panel("Usage · " + headline.strip("*"), counts))
+    card = {
+        "schema": "2.0",
+        "config": {"update_multi": True},
+        "body": {"elements": elements},
+    }
+    if title:
+        card["header"] = header(title)
+    return card
+
+
+def reply_card(answer, fallback, previews, footer, confirmation):
+    if previews:
+        card = preview_card(answer, previews, footer=footer, confirmation=confirmation)
+        if card:
+            return card
+    # Fit the complete answer when possible, including wide Unicode and byte-heavy tables.
+    room = len(fallback)
+    while room > 0:
+        words = close_fence(shorten(fallback, room))
+        card = reply_layout(
+            [{"tag": "markdown", "content": words}], footer, confirmation
+        )
+        current = size(card)
+        if current <= BUDGET:
+            return json.dumps(card, ensure_ascii=False)
+        room = min(room - 1, room * (BUDGET - 500) // current)
+    return None
+
+
+def confirmation_fallback(answer, footer, confirmation):
+    """The previous card schema keeps the confirmation usable on a V2 refusal."""
+    if confirmation is None:
+        return None
+    elements = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": close_fence(shorten(answer, 2200))},
+        },
+        {"tag": "div", "text": text(confirmation["label"])},
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": text("Confirm"),
+                    "type": "primary",
+                    "value": confirmation["value"],
+                }
+            ],
+        },
+    ]
+    if footer:
+        elements.append(
+            {"tag": "note", "elements": [{"tag": "lark_md", "content": footer}]}
+        )
+    return json.dumps(
+        {"header": header("Confirm this action"), "elements": elements},
+        ensure_ascii=False,
+    )
+
+
+def preview_card(answer, previews, budget=BUDGET, *, footer="", confirmation=None):
     """The card as a JSON string, or None when the previews cannot be laid out as tables."""
     if not previews or len(previews) > MAX_TABLES:
         return None
@@ -146,12 +258,17 @@ def preview_card(answer, previews, budget=BUDGET):
     if None in parts:
         return None
 
+    def layout(cap, copies=False):
+        return build(
+            answer, parts, shown, cap, copies, footer=footer, confirmation=confirmation
+        )
+
     shown = [len(part.rows) for part in parts]
     for cap in CELL_CAPS:
-        if size(build(answer, parts, shown, cap)) <= budget:
+        if size(layout(cap)) <= budget:
             break
     else:
-        while size(build(answer, parts, shown, cap)) > budget:
+        while size(layout(cap)) > budget:
             longest = max(range(len(shown)), key=shown.__getitem__)
             if shown[longest] <= 1:
                 return None
@@ -159,7 +276,7 @@ def preview_card(answer, previews, budget=BUDGET):
 
     # Copy blocks carry the full values, so they are offered only when nothing was cut.
     whole = cap is None and all(n == len(p.rows) for n, p in zip(shown, parts))
-    card = build(answer, parts, shown, cap, True) if whole else None
+    card = layout(cap, True) if whole else None
     if card is None or size(card) > budget:
-        card = build(answer, parts, shown, cap, "left out")
+        card = layout(cap, "left out")
     return json.dumps(card, ensure_ascii=False)
