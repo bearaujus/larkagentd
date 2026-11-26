@@ -35,6 +35,27 @@ Use a fresh database with this unreleased baseline. An earlier disposable checko
 with pre-release migration history needs a new database. The baseline does not
 automatically reset a database.
 
+### Local pgvector
+
+`make run` starts PostgreSQL 16 with pgvector. `make spawn-db` enables the
+`vector` extension and creates the Group Brain collection if it does not exist.
+It works with both new databases and existing Compose volumes. Back up an
+existing database before switching images; keep the named volume.
+
+To enable semantic recall, set `GROUP_BRAIN_EMBEDDING_BASE_URL` and
+`GROUP_BRAIN_EMBEDDING_API_KEY` in `.env` for an approved OpenAI-compatible
+embeddings endpoint. Set `GROUP_BRAIN_EMBEDDING_MODEL` and
+`GROUP_BRAIN_EMBEDDING_DIMENSIONS` to match the provider. Without an embedding
+endpoint, recall still uses keyword search and live lookups.
+
+The default collection is `group_brain_v1` with 1024 dimensions. If you change
+the embedding model or dimensions after creating a collection, give
+`GROUP_BRAIN_COLLECTION` a new name before running `make run`. Provisioning
+does not alter or delete existing collections.
+
+With `make run LOCAL_DATABASE=false`, the operator must enable pgvector and
+provision the matching collection in the external `DATABASE_URL` database.
+
 ## Knowledge and connector configuration
 
 `KNOWLEDGE_MCP_SERVERS` is a JSON object mapping a name to either
