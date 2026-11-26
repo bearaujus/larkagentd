@@ -1,0 +1,112 @@
+name: larkagentd
+
+x-runtime: &runtime
+  image: larkagentd-local:dev
+  build:
+    context: .
+    args:
+      LARK_CLI_VERSION: "${LARK_CLI_VERSION:-1.0.99}"
+
+x-database: &database
+  DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in your deployment environment}"
+  CREDENTIAL_ENCRYPTION_KEY: "${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY}"
+
+x-knowledge: &knowledge
+  GROUP_BRAIN_ENABLED: "${GROUP_BRAIN_ENABLED:-true}"
+  GROUP_BRAIN_MAX_HISTORY_DAYS: "${GROUP_BRAIN_MAX_HISTORY_DAYS:-30}"
+  KNOWLEDGE_MCP_SERVERS: "${KNOWLEDGE_MCP_SERVERS:-}"
+  GROUP_BRAIN_LLM_BASE_URL: "${GROUP_BRAIN_LLM_BASE_URL:-}"
+  GROUP_BRAIN_LLM_API_KEY: "${GROUP_BRAIN_LLM_API_KEY:-}"
+  GROUP_BRAIN_LLM_MODEL: "${GROUP_BRAIN_LLM_MODEL:-}"
+
+services:
+  migrate:
+    <<: *runtime
+    profiles: [maintenance]
+    command: ["alembic", "upgrade", "head"]
+    environment: *database
+
+  toolservice:
+    <<: *runtime
+    command: ["larkagentd-tools"]
+    environment:
+      <<: [*database, *knowledge]
+      TOOL_SERVICE_KEY: "${TOOL_SERVICE_KEY:?Set TOOL_SERVICE_KEY}"
+      LARK_APP_ID: "${LARK_APP_ID:?Set LARK_APP_ID}"
+      LARK_READ_APP_ID: "${LARK_READ_APP_ID:-${LARK_APP_ID}}"
+      LARK_READ_APP_SECRET: "${LARK_READ_APP_SECRET:-${LARK_APP_SECRET}}"
+      LARK_READ_BRAND: "${LARK_READ_BRAND:-lark}"
+      BRAVE_SEARCH_API_KEY: "${BRAVE_SEARCH_API_KEY:-}"
+      GITLAB_READ_URL: "${GITLAB_READ_URL:-}"
+      GITLAB_READ_TOKEN: "${GITLAB_READ_TOKEN:-}"
+      GOOGLE_SERVICE_ACCOUNT_JSON: "${GOOGLE_SERVICE_ACCOUNT_JSON:-}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/readyz', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+    restart: unless-stopped
+
+  hermes-config:
+    <<: *runtime
+    user: "0:0"
+    command: ["python", "scripts/configure_hermes.py"]
+    environment:
+      HERMES_PROVIDER: "${HERMES_PROVIDER:-custom}"
+      HERMES_MODEL: "${HERMES_MODEL:?Set HERMES_MODEL}"
+      HERMES_OPENAI_ENDPOINT: "${HERMES_OPENAI_ENDPOINT:-}"
+    volumes:
+      - hermes:/app/hermes_data
+
+  hermes:
+    image: "${HERMES_IMAGE:-nousresearch/hermes-agent:stable}"
+    command: ["gateway", "run"]
+    environment:
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_PORT: "8642"
+      API_SERVER_KEY: "${AGENT_API_KEY:-larkagentd-local-development}"
+      OPENAI_API_KEY: "${HERMES_API_KEY:-}"
+      OPENAI_BASE_URL: "${HERMES_OPENAI_ENDPOINT:-}"
+      TOOL_SERVICE_URL: "http://toolservice:8081"
+      TOOL_SERVICE_KEY: "${TOOL_SERVICE_KEY:?Set TOOL_SERVICE_KEY}"
+    volumes:
+      - hermes:/opt/data
+      - ./hermes_plugin/larkagentd_tools:/opt/data/plugins/larkagentd_tools:ro
+    depends_on:
+      hermes-config:
+        condition: service_completed_successfully
+      toolservice:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+    restart: unless-stopped
+
+  gateway:
+    <<: *runtime
+    environment:
+      <<: [*database, *knowledge]
+      LARK_APP_ID: "${LARK_APP_ID:?Set LARK_APP_ID}"
+      LARK_APP_SECRET: "${LARK_APP_SECRET:?Set LARK_APP_SECRET}"
+      LARK_READ_APP_ID: "${LARK_READ_APP_ID:-${LARK_APP_ID}}"
+      LARK_READ_APP_SECRET: "${LARK_READ_APP_SECRET:-${LARK_APP_SECRET}}"
+      LARK_READ_BRAND: "${LARK_READ_BRAND:-lark}"
+      AGENT_URL: "http://hermes:8642"
+      AGENT_API_KEY: "${AGENT_API_KEY:-larkagentd-local-development}"
+      HERMES_MODEL: "${HERMES_MODEL:?Set HERMES_MODEL}"
+      AVAILABLE_MODELS: "${AVAILABLE_MODELS:-}"
+      VISION_MODELS: "${VISION_MODELS:-}"
+      MODEL_REASONING_EFFORTS: "${MODEL_REASONING_EFFORTS:-}"
+      DASHBOARD_ADMIN_EMAILS: "${DASHBOARD_ADMIN_EMAILS:?Set DASHBOARD_ADMIN_EMAILS}"
+      DASHBOARD_PUBLIC_URL: "${DASHBOARD_PUBLIC_URL:-http://localhost:18080}"
+    ports: ["127.0.0.1:${DASHBOARD_PORT:-18080}:8080"]
+    depends_on:
+      hermes:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  hermes:
