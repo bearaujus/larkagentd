@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Protocol
-from urllib.parse import parse_qs, urlsplit
 
-from ..toolservice.larkcli import LarkError
+from ..lark.message_links import message_link
+from ..lark.message_links import verified_link as verified_link
+from ..toolservice.larkcli import LarkError, message_time
 
 
 @dataclass(frozen=True)
@@ -64,47 +65,6 @@ class GroupSource(Protocol):
     ) -> Page: ...
 
 
-# The applink paths that open one message or one chat.
-LINK_PATHS = ("/client/message/link/open", "/client/message/open", "/client/chat/open")
-
-
-def verified_link(
-    url, *, chat_id=None, hosts=("applink.larksuite.com", "applink.feishu.cn")
-) -> str | None:
-    if not isinstance(url, str):
-        return None
-    try:
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname not in hosts
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            return None
-        if parsed.port not in (None, 443):
-            return None
-        # Only the paths that open a message or a chat. Anything else on an applink host (a redirect, an
-        # invite, a share link, a web view) is not a message reference.
-        if parsed.path not in LINK_PATHS or any(
-            word in parsed.path.lower() for word in ("invite", "share", "join")
-        ):
-            return None
-        params = parse_qs(parsed.query, keep_blank_values=True)
-        carried = [
-            value
-            for key in ("chat_id", "chatid", "openchatid", "openchatId")
-            for name in params
-            if name.lower() == key.lower()
-            for value in params[name]
-        ]
-        if chat_id is not None and any(value != chat_id for value in carried):
-            return None
-        return url
-    except (ValueError, UnicodeError):
-        return None
-
-
 def _text(content):
     if isinstance(content, str):
         try:
@@ -118,18 +78,6 @@ def _text(content):
     if isinstance(content, list):
         return " ".join(part for value in content if (part := _text(value)))
     return ""
-
-
-def _timestamp(value):
-    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        return None
-    try:
-        stamp = float(value)
-        if stamp > 10_000_000_000:
-            stamp /= 1000
-        return datetime.fromtimestamp(stamp, timezone.utc)
-    except (ValueError, OverflowError, OSError):
-        return None
 
 
 def _map_error(exc):
@@ -201,7 +149,7 @@ class CliGroupSource:
             sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
             message_id = item.get("message_id") or item.get("id")
             actual_chat = item.get("chat_id", chat_id)
-            stamp = _timestamp(item.get("create_time"))
+            stamp = message_time(item.get("create_time"))
             kind = item.get("msg_type") or "text"
             content = item.get("content", "") or (item.get("body") or {}).get(
                 "content", ""
@@ -215,13 +163,10 @@ class CliGroupSource:
             ):
                 skipped += 1
                 continue
-            link = None
-            for key in ("message_app_link", "link"):
-                link = verified_link(
-                    item.get(key), chat_id=actual_chat, hosts=self.hosts
-                )
-                if link:
-                    break
+            if actual_chat != chat_id:
+                skipped += 1
+                continue
+            link = message_link(item, chat_id, hosts=self.hosts)
             sender_type = (
                 sender.get("sender_type")
                 or sender.get("type")

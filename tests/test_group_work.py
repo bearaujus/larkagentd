@@ -1,4 +1,5 @@
 import json
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,11 @@ from larkagentd.core import group_actions
 from larkagentd.core.scopes import DEFAULT_GROUP_TOOLS
 from larkagentd.core.store import gateway_policies, jobs
 from larkagentd.gateway.access import AccessError
+from larkagentd.knowledge.learned import (
+    activate_candidate,
+    list_records,
+    verify_candidate,
+)
 from larkagentd.knowledge.library import SourceLibrary, mcp_settings
 from larkagentd.knowledge.models import GroupBrainConfig
 from larkagentd.lark.links import parse_link
@@ -25,6 +31,12 @@ KEY = "synthetic-key-123456"
 CHAT = "oc_synthetic"
 OWNER = "t:u"
 DOC = "https://example.larksuite.com/docx/ExampleDocumentToken"
+
+
+def confirmation_value(payload):
+    elements = json.loads(payload["preview_card"])["body"]["elements"]
+    callback = next(e for e in elements if e["tag"] == "button")["behaviors"][0]
+    return callback["value"]
 
 
 def test_first_mention_is_answered_in_group_and_dm_cannot_start_model(store):
@@ -174,11 +186,333 @@ def test_group_file_check_requires_group_edit_even_with_bot_edit():
         service.require(ctx, link)
 
 
+@pytest.mark.parametrize(
+    "bot_view,external_file,external_chat,same_tenant,app_matches,write,expected",
+    [
+        (True, False, False, True, True, False, None),
+        (False, False, False, True, True, False, "lark_bot_view_denied"),
+        (True, True, False, True, True, False, "lark_permission_unverified"),
+        (True, False, True, True, True, False, "lark_permission_unverified"),
+        (True, False, False, False, True, False, "lark_permission_unverified"),
+        (True, False, False, True, False, False, "lark_permission_unverified"),
+        (True, False, False, True, True, True, "lark_edit_unverified"),
+    ],
+)
+def test_org_link_permission_when_lark_withholds_collaborators(
+    bot_view, external_file, external_chat, same_tenant, app_matches, write, expected
+):
+    class Reader:
+        app_id = "test-app"
+
+        def _invoke(self, command, _args):
+            match command[-1].split("/")[-1]:
+                case "+member-list":
+                    raise LarkError("forbidden")
+                case "auth":
+                    return {"auth_result": bot_view}
+                case "public":
+                    return {
+                        "permission_public": {
+                            "link_share_entity": "tenant_readable",
+                            "external_access": external_file,
+                        }
+                    }
+                case _:
+                    return {
+                        "external": external_chat,
+                        "tenant_key": "t" if same_tenant else "another-tenant",
+                    }
+
+    files = LarkFiles(Reader(), None, None, "test-app" if app_matches else "other-app")
+    link = parse_link(DOC)
+    ctx = SimpleNamespace(
+        owner=OWNER, chat_type="group", chat_id=CHAT, lark_allowed={link.token}
+    )
+    if expected:
+        with pytest.raises(LarkError, match=expected):
+            files.require(ctx, link, write=write)
+    else:
+        files.require(ctx, link, write=write)
+
+
+@pytest.mark.parametrize(
+    "group_edit, org_visible, edit_refusal, after_confirm, fresh_link",
+    [
+        ("view", True, "lark_write_permission", None, False),
+        ("hidden", False, "lark_edit_unverified", None, False),
+        ("edit", False, None, None, False),
+        ("edit", False, None, "remove_group_edit", False),
+        ("hidden", True, None, None, False),
+        ("hidden", True, None, None, True),
+        ("hidden", True, None, "remove_org_view", False),
+        ("hidden", True, None, "lark_refuses_write", False),
+    ],
+)
+def test_thread_edit_checks_access_and_requires_confirm(
+    store, caplog, group_edit, org_visible, edit_refusal, after_confirm, fresh_link
+):
+    svc, model, transport = room(store)
+    registry = ToolRegistry(store)
+    from larkagentd.lark.inbound import Fetched
+
+    transport.fetch_message = lambda _: Fetched(DOC, chat_id=GROUP, sender_id="u")
+
+    class Reader:
+        app_id = "synthetic-app"
+        permission = "view"
+        organization_link = org_visible
+        refuse_write = False
+
+        def _invoke(self, command, _args):
+            if command[0] == "drive":
+                if self.permission == "hidden":
+                    raise LarkError("forbidden", provider_code=1063004)
+                return {
+                    "items": [
+                        {
+                            "member_id": GROUP,
+                            "member_type": "openchat",
+                            "perm": self.permission,
+                        }
+                    ]
+                }
+            if command == ("docs", "+update"):
+                updates.append(command)
+                if self.refuse_write:
+                    raise LarkError("forbidden", provider_code=1063002)
+            if command[-1].endswith("/public"):
+                return {
+                    "permission_public": {
+                        "external_access": False,
+                        "link_share_entity": "tenant_readable"
+                        if self.organization_link
+                        else "closed",
+                    }
+                }
+            if "/im/v1/chats/" in command[-1]:
+                return {"external": False, "tenant_key": "t"}
+            return {"auth_result": True}
+
+        def doc(self, url):
+            assert url == DOC
+            return {"content": "The rollout starts Monday."}
+
+    reader = Reader()
+    tools = ToolService(
+        store,
+        svc,
+        KEY,
+        registry=registry,
+        vault=svc.vault,
+        lark=reader,
+        gateway_app=reader.app_id,
+    )
+    registry.sync(tools.tools)
+    with store.engine.begin() as conn:
+        store.set_scope_tools(conn, f"group:{GROUP}", DEFAULT_GROUP_TOOLS)
+
+    def call(session_id, name, args):
+        return tools.handle(
+            f"Bearer {KEY}",
+            name,
+            json.dumps({"session_id": session_id, "arguments": args}).encode(),
+        )[1]
+
+    def check_tools(session_id):
+        assert (
+            call(session_id, "lark_read", {"url": DOC})["result"]["content"]
+            == "The rollout starts Monday."
+        )
+        reader.permission = group_edit
+        outcomes.append(
+            call(
+                session_id,
+                "lark_file_edit",
+                {"url": DOC, "action": "append", "content": "change"},
+            )
+        )
+
+    outcomes, updates = [], []
+    model.hook = check_tools
+    text = f"Append this to {DOC}" if fresh_link else "Try that append again?"
+    origin = ask(svc, "u", text, thread="original")
+    drain(svc, transport)
+    if not fresh_link:
+        assert model.requests[0]["lark_thread_links"] == [DOC]
+    assert len(outcomes) == 1
+    assert not updates
+    if edit_refusal:
+        assert outcomes[0]["error"] == edit_refusal
+        assert outcomes[0]["retryable"] is False
+        assert outcomes[0]["note"]
+        if group_edit == "hidden":
+            records = [
+                record
+                for record in caplog.records
+                if getattr(record, "event", None) == "tool.called"
+                and record.fields.get("tool") == "lark_file_edit"
+            ]
+            (record,) = records
+            assert {
+                k: record.fields[k]
+                for k in (
+                    "stage",
+                    "access",
+                    "bot_access",
+                    "provider_code",
+                    "upstream_outcome",
+                )
+            } == {
+                "stage": "collaborator_list",
+                "access": "edit",
+                "bot_access": "granted",
+                "provider_code": 1063004,
+                "upstream_outcome": "forbidden",
+            }
+            assert record.fields["job_id"]
+            assert DOC not in record.getMessage()
+            assert "change" not in record.getMessage()
+        return
+    assert outcomes[0]["result"]["confirmation_requested"]
+    if group_edit == "hidden":
+        assert outcomes[0]["result"]["access_basis"] == "bot_edit"
+    card = next(p for p in transport.sent if p.get("preview_card"))
+    assert card["reply_to"] == origin
+    value = confirmation_value(card)
+    assert "no longer available" in svc.action("t", "other", GROUP, "1", value)
+    assert "Confirmed" in svc.action("t", "u", GROUP, "2", value)
+    if after_confirm == "remove_group_edit":
+        reader.permission = "view"
+    elif after_confirm == "remove_org_view":
+        reader.organization_link = False
+    elif after_confirm == "lark_refuses_write":
+        reader.refuse_write = True
+    model.hook = lambda sid: outcomes.extend(
+        call(sid, "run_confirmed_action", {}) for _ in range(2)
+    )
+    drain(svc, transport)
+    if after_confirm == "remove_group_edit":
+        assert outcomes[1]["error"] == "lark_write_permission"
+        assert not updates
+    elif after_confirm == "remove_org_view":
+        assert outcomes[1]["error"] == "lark_edit_unverified"
+        assert not updates
+    elif after_confirm == "lark_refuses_write":
+        assert outcomes[1]["error"] == "forbidden"
+        (record,) = [
+            record
+            for record in caplog.records
+            if getattr(record, "event", None) == "tool.called"
+            and record.fields.get("stage") == "write_request"
+        ]
+        assert record.fields["provider_code"] == 1063002
+        assert updates == [("docs", "+update")]
+    else:
+        assert outcomes[1]["result"]["verified"]
+        if group_edit == "hidden":
+            assert outcomes[1]["result"]["access_basis"] == "bot_edit"
+        assert updates == [("docs", "+update")]
+    assert outcomes[2]["error"] == "confirmation_expired"
+
+
 def test_slide_outline_yields_native_editable_safe_xml():
     xml = _slide_xml({"title": "A & B < C", "bullets": ["Pilot outcomes"]})
     assert "&amp;" in xml and "&lt;" in xml and "<shape" in xml
     with pytest.raises(LarkError, match="bad_slide"):
         _slide_xml({"title": "A", "bullets": []})
+
+
+CHART_SLIDE = {
+    "title": "Share by region",
+    "chart": {
+        "categories": ["North & East", "South"],
+        "series": [
+            {"name": "Orders (%)", "values": [40.5, 59.5]},
+            {"name": "Sales (%)", "values": [55, 45]},
+        ],
+    },
+}
+
+
+def test_slide_chart_has_editable_grouped_columns_and_validated_values():
+    slide = ET.fromstring(_slide_xml(CHART_SLIDE))
+    assert slide.find(".//{*}chartPlot").get("type") == "column"
+    assert slide.find(".//{*}chartStack") is None
+    assert slide.find(".//{*}dim1/{*}chartField").text == "North & East,South"
+    assert [
+        (field.get("name"), field.text)
+        for field in slide.findall(".//{*}dim2/{*}chartField")
+    ] == [("Orders (%)", "40.5,59.5"), ("Sales (%)", "55,45")]
+    for values in ([10], [True, 10], [float("nan"), 10]):
+        invalid = {
+            **CHART_SLIDE,
+            "chart": {
+                "categories": ["North", "South"],
+                "series": [{"name": "Orders", "values": values}],
+            },
+        }
+        with pytest.raises(LarkError, match="bad_slide"):
+            _slide_xml(invalid)
+
+
+@pytest.mark.parametrize(
+    "oversized, outcome, stage",
+    [
+        (True, "bad_slide", "slide_validation"),
+        (False, "lark_slides_create_scope", "create_request"),
+    ],
+)
+def test_slide_create_distinguishes_validation_from_lark_refusal(
+    store, caplog, oversized, outcome, stage
+):
+    svc, model, transport = room(store)
+    registry = ToolRegistry(store)
+    calls, results = [], []
+
+    class Reader:
+        app_id = "synthetic-app"
+
+        def _invoke(self, command, _args):
+            calls.append(command)
+            raise LarkError("forbidden", provider_code=99991672)
+
+    reader = Reader()
+    tools = ToolService(
+        store,
+        svc,
+        KEY,
+        registry=registry,
+        vault=svc.vault,
+        lark=reader,
+        gateway_app=reader.app_id,
+    )
+    registry.sync(tools.tools)
+    with store.engine.begin() as conn:
+        store.set_scope_tools(conn, f"group:{GROUP}", DEFAULT_GROUP_TOOLS)
+    slide = {"title": "Pilot", "bullets": ["x" * 101]} if oversized else CHART_SLIDE
+    args = {"kind": "slides", "title": "Pilot", "content": json.dumps([slide])}
+    model.hook = lambda sid: results.append(
+        tools.handle(
+            f"Bearer {KEY}",
+            "lark_file_create",
+            json.dumps({"session_id": sid, "arguments": args}).encode(),
+        )[1]
+    )
+    ask(svc, "u", "Build slides for the pilot")
+    drain(svc, transport)
+    (result,) = results
+    assert result["error"] == outcome and result["retryable"] is oversized
+    assert calls == ([] if oversized else [("slides", "+create")])
+    (record,) = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "tool.called"
+        and record.fields.get("tool") == "lark_file_create"
+    ]
+    assert record.fields["stage"] == stage
+    if not oversized:
+        assert "slides:presentation:create" in result["note"]
+        assert record.fields["provider_code"] == 99991672
 
 
 def test_cards_bind_original_owner_chat_and_action_across_jobs(store):
@@ -212,7 +546,7 @@ def test_cards_bind_original_owner_chat_and_action_across_jobs(store):
     assert results[0]["result"]["confirmation_requested"]
     payload = next(p for p in transport.sent if p.get("preview_card"))
     assert payload["chat"] == GROUP and payload["reply_to"] == origin
-    value = json.loads(payload["preview_card"])["elements"][1]["actions"][0]["value"]
+    value = confirmation_value(payload)
     with store.engine.begin() as conn:
         assert not conn.scalar(select(jobs.c.id).where(jobs.c.kind == "prepare"))
     assert "no longer available" in svc.action("t", "other", GROUP, "1", value)
@@ -232,12 +566,33 @@ def test_cards_bind_original_owner_chat_and_action_across_jobs(store):
         assert conn.scalar(select(group_actions.actions.c.status)) == "consumed"
 
 
+def save_learned_fact(runtime, scope, message, content):
+    args = {
+        "content": content,
+        "category": "decision",
+        "evidence": message.text,
+        "current_only": True,
+        "ids": [message.message_id],
+    }
+    generation = runtime.effective(scope).generation
+    live = verify_candidate(runtime, scope, message.sender_id, args)
+    with runtime.connection() as conn:
+        assert (
+            activate_candidate(
+                conn, runtime, scope, message.sender_id, args, live, generation
+            )
+            == "saved"
+        )
+        records, _ = list_records(conn, scope, None)
+    return records[0]
+
+
 def test_learned_fact_stops_serving_when_its_original_message_changes(store):
     from dataclasses import replace
     from datetime import datetime, timezone
 
     from larkagentd.knowledge.lark_sources import SourceMessage
-    from larkagentd.knowledge.learned import learn, references, verify
+    from larkagentd.knowledge.learned import verify
     from larkagentd.knowledge.runtime import GroupBrainRuntime
 
     svc, _, _ = room(store)
@@ -265,17 +620,10 @@ def test_learned_fact_stops_serving_when_its_original_message_changes(store):
             messages=lambda _group, ids: [m for m in rows if m.message_id in ids]
         ),
     )
-    result = learn(
-        runtime,
-        scope,
-        "ou_example",
-        {"content": "The pilot uses thirty volunteers.", "category": "decision"},
-        [message.message_id],
-        runtime.effective(scope).generation,
+    result = save_learned_fact(
+        runtime, scope, message, "The pilot uses thirty volunteers."
     )
-    assert result["state"] == "active"
-    with store.engine.begin() as conn:
-        source_rows = references(conn, scope, result["memory_id"], result["revision"])
+    source_rows = result["refs"]
     assert (
         verify(runtime, scope, [source_rows])[0][0]["source_id"] == message.message_id
     )
@@ -330,7 +678,7 @@ def test_learned_fact_stops_serving_when_its_original_message_changes(store):
     [
         ("docx", "# Pilot\nA quick update."),
         ("sheets", '[["Name","Status"],["Pilot","Ready"]]'),
-        ("slides", '[{"title":"Pilot","bullets":["Ready to start."]}]'),
+        ("slides", json.dumps([CHART_SLIDE])),
     ],
 )
 def test_create_verifies_native_owner_and_group_manage_before_releasing_link(
@@ -372,6 +720,10 @@ def test_create_verifies_native_owner_and_group_manage_before_releasing_link(
             if command[0] == "api":
                 endpoint = command[2]
                 if endpoint.endswith("/auth"):
+                    assert (
+                        json.loads(args[args.index("--params") + 1])["action"]
+                        == "manage_public"
+                    )
                     return {"auth_result": True}
                 if endpoint.endswith("/transfer_owner"):
                     self.owner = json.loads(args[args.index("--data") + 1])["member_id"]
@@ -595,14 +947,7 @@ def test_learned_page_cursor_stays_stable_when_a_new_fact_arrives(store, monkeyp
             None,
         )
         messages[key] = message
-        return learned.learn(
-            runtime,
-            scope,
-            "ou_synthetic",
-            {"content": message.text, "category": "decision"},
-            [key],
-            runtime.effective(scope).generation,
-        )["memory_id"]
+        return save_learned_fact(runtime, scope, message, message.text)["id"]
 
     monkeypatch.setattr(learned, "PAGE_SIZE", 2)
     oldest, middle, newest = [save(i) for i in range(3)]
@@ -658,22 +1003,11 @@ def test_group_reply_uses_directory_name_and_native_requester_mention(store):
 
     adapter = SimpleNamespace(deliver=deliver, send_parts=lambda *_: None)
     assert Lark.send(adapter, answer, "unique") == "om_sent"
-    assert delivered == [
-        (
-            GROUP,
-            msg,
-            "post",
-            {
-                "zh_cn": {
-                    "content": [
-                        [{"tag": "at", "user_id": "ou_requester"}],
-                        [{"tag": "md", "text": answer["text"]}],
-                    ]
-                }
-            },
-            True,
-        )
-    ]
+    (sent,) = delivered
+    assert sent[:3] == (GROUP, msg, "interactive") and sent[4]
+    elements = sent[3]["body"]["elements"]
+    assert elements[0]["content"] == "<at id=ou_requester></at>"
+    assert elements[1]["content"] == answer["text"]
 
 
 def test_mention_is_gateway_owned_in_post_card_and_text_fallbacks():
@@ -682,7 +1016,7 @@ def test_mention_is_gateway_owned_in_post_card_and_text_fallbacks():
     delivered = {}
 
     def fail_until_text(chat, target, kind, content, key, thread=False):
-        delivered[kind] = json.loads(content)
+        delivered.setdefault(kind, json.loads(content))
         if kind != "text":
             raise RuntimeError("unavailable")
         return "sent"
@@ -744,3 +1078,130 @@ def test_reply_skill_is_discoverable_and_readable():
     store = SkillStore([root])
     assert "lark-replies" in {item["name"] for item in store.list()["global"]}
     assert "```sh" in store.read("lark-replies")["content"]
+
+
+def test_group_history_can_open_live_file_but_grants_no_edit_or_later_turn_access(
+    store, tmp_path, monkeypatch
+):
+    from larkagentd.toolservice import toolservice
+    from larkagentd.toolservice.larkcli import LarkReader
+
+    svc, model, transport = room(store)
+    group = CHAT
+    change(svc.access, "POST", "groups", {"group_id": group})
+    src = {
+        "chat_id": group,
+        "message_id": "om_humanmessage",
+        "create_time": "2026-11-27 02:00",
+        "msg_type": "text",
+        "sender": {"id": "ou_teammate", "sender_type": "user"},
+        "content": {"text": f"The test page is {DOC}"},
+    }
+    app_doc = "https://example.larksuite.com/docx/AppPostedDocument"
+    cross_doc = "https://example.larksuite.com/docx/CrossGroupDocument"
+
+    class Reader(LarkReader):
+        latest = src
+        org_readable = True
+        docs = []
+
+        def _call(self, command, args, cwd=None):
+            if command == ("im", "+chat-messages-list"):
+                return {
+                    "messages": [
+                        src,
+                        dict(
+                            src,
+                            message_id="om_appmessage",
+                            content={"text": app_doc},
+                            sender={"sender_type": "app"},
+                        ),
+                        dict(
+                            src,
+                            message_id="om_crossmessage",
+                            content={"text": cross_doc},
+                            chat_id="oc_anothergroup",
+                        ),
+                    ]
+                }
+            assert command == ("im", "+messages-mget")
+            return {"messages": [self.latest]}
+
+        def _invoke(self, command, _args):
+            route = command[-1]
+            if route.endswith("/members/auth"):
+                return {"auth_result": True}
+            if command == ("drive", "+member-list"):
+                raise LarkError("forbidden", provider_code=1063004)
+            if route.endswith("/public"):
+                return {
+                    "permission_public": {
+                        "external_access": False,
+                        "link_share_entity": "tenant_readable"
+                        if self.org_readable
+                        else "closed",
+                    }
+                }
+            assert route == f"/open-apis/im/v1/chats/{group}"
+            return {"external": False, "tenant_key": "t"}
+
+        def doc(self, url):
+            self.docs.append(url)
+            return {"content": "SELECT item FROM test_table LIMIT 5"}
+
+    reader = Reader(("lark-cli",), "synthetic", "dummy", tmp_path)
+    registry = ToolRegistry(store)
+    tools = ToolService(
+        store,
+        svc,
+        KEY,
+        registry=registry,
+        vault=svc.vault,
+        lark=reader,
+        gateway_app=reader.app_id,
+    )
+    registry.sync(tools.tools)
+
+    def call(sid, name, **arguments):
+        return tools.handle(
+            f"Bearer {KEY}",
+            name,
+            json.dumps({"session_id": sid, "arguments": arguments}).encode(),
+        )[1]
+
+    def during(sid):
+        with monkeypatch.context() as mock:
+            mock.setattr(toolservice, "MAX_RESULT", 100)
+            assert call(sid, "lark_thread", scope="chat")["error"] == "result_too_large"
+        assert call(sid, "lark_read", url=DOC)["error"] == "link_not_from_user"
+        history = call(sid, "lark_thread", scope="chat")
+        assert history["ok"]
+        assert call(sid, "lark_read", url=app_doc)["error"] == "link_not_from_user"
+        assert call(sid, "lark_read", url=cross_doc)["error"] == "link_not_from_user"
+        assert (
+            call(sid, "lark_file_edit", url=DOC, action="append", content="edit")[
+                "error"
+            ]
+            == "link_not_shared"
+        )
+        assert call(sid, "lark_read", url=DOC)["result"]["content"].endswith("LIMIT 5")
+        reader.org_readable = False
+        assert call(sid, "lark_read", url=DOC)["error"] == "lark_permission_unverified"
+        reader.latest = dict(src, content={"text": "The file link was removed"})
+        assert (
+            call(sid, "lark_read", url=DOC)["error"]
+            == "lark_history_source_unavailable"
+        )
+
+    model.hook = during
+    ask(svc, "u", "Can you show five samples from the query in this page?", chat=group)
+    drain(svc, transport)
+    assert reader.docs == [DOC]
+
+    def later(sid):
+        assert call(sid, "lark_read", url=DOC)["error"] == "link_not_from_user"
+
+    model.hook = later
+    ask(svc, "u", "Can you check something else?", chat=group)
+    drain(svc, transport)
+    assert reader.docs == [DOC]

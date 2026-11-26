@@ -45,10 +45,11 @@ class Resolved:
     lark_links: bool = False
     # The conversation the quoted message belongs to, so its history can be brought along.
     quote_session: str = ""
-    # The tokens of the links the user wrote (their message, or a message of theirs they quoted), in a
-    # direct chat only: the one list `lark_read` may be asked about. Never links found inside a
-    # document, in an assistant message, or in a group.
+    # Links in the current request, also eligible for editing with the appropriate grants.
     lark_allowed: list = field(default_factory=list)
+    lark_thread_links: list = field(
+        default_factory=list
+    )  # read-only links from the requester
 
     def counts(self):
         return dict(
@@ -176,14 +177,7 @@ def read_file(transport, attachment, resolved, used):
 
 
 def note_links(payload, resolved, lark_in_group=False):
-    """Note the Lark links the user wrote; the Gateway never opens them.
-
-    In a direct chat the source is the message text plus a quoted message the user wrote, never an
-    assistant message, and the tokens become the list `lark_read` may open. In a group a quoted message
-    may be another person's, so only the speaker's own text counts, and only where an administrator
-    enabled `lark_read` for that group; otherwise nothing is allowed. No content is read here,
-    so a link inside a document is never seen.
-    """
+    """Collect current-request links without opening the files they point to."""
     group = bool(payload.get("group"))
     source = payload.get("text", "")
     if resolved.quote and not resolved.quote["assistant"] and not group:
@@ -204,7 +198,46 @@ def note_links(payload, resolved, lark_in_group=False):
         )
 
 
-def resolve(transport, payload, lark_in_group=False):
+def thread_link_candidates(transport, payload, owner, remote, quoted):
+    """Find the requester's links in a same-chat quote or earlier live thread messages."""
+    _, _, requester = owner.partition(":")
+    if not requester:
+        return []
+
+    def own_links(message):
+        if (
+            message
+            and not message.assistant
+            and message.sender_id == requester
+            and message.chat_id == payload.get("chat")
+        ):
+            return links(message.text)
+        return []
+
+    if references := own_links(quoted):
+        return references
+    if not payload.get("in_thread"):
+        return []
+    current_ids = {*(payload.get("message_ids") or ()), payload.get("message_id")}
+    for index, message in enumerate(remote):
+        if message["message_id"] in current_ids:
+            for earlier in reversed(remote[:index]):
+                if earlier["owner"].partition(":")[2] == requester:
+                    if references := links(earlier["text"]):
+                        return references
+            break
+    root = payload.get("thread")
+    if root and root not in current_ids and root != payload.get("reply_to"):
+        try:
+            return own_links(transport.fetch_message(root))
+        except Exception:
+            pass
+    return []
+
+
+def resolve(
+    transport, payload, lark_in_group=False, *, owner="", remote=(), lark_thread=False
+):
     """Everything a prepare job's message carries, as a Resolved. Never raises."""
     resolved = Resolved()
     used = 0
@@ -240,6 +273,7 @@ def resolve(transport, payload, lark_in_group=False):
         else:
             resolved.notes.append("A forwarded conversation could not be read.")
     reply_to = payload.get("reply_to")
+    fetched = None
     if reply_to:
         try:
             fetched = transport.fetch_message(reply_to)
@@ -252,4 +286,7 @@ def resolve(transport, payload, lark_in_group=False):
             )
             resolved.quote_session = getattr(fetched, "session", "") or ""
     note_links(payload, resolved, lark_in_group)
+    if lark_thread and not resolved.lark_links:
+        references = thread_link_candidates(transport, payload, owner, remote, fetched)
+        resolved.lark_thread_links = references[:MAX_LINKS]
     return resolved

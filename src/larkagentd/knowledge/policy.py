@@ -20,7 +20,6 @@ class Effective:
     capabilities: dict = field(default_factory=dict)
     generation: int = 0
     version: int = 0
-    learning_mode: str = "explicit"
     history_window_days: int = 30
 
     @property
@@ -40,7 +39,6 @@ def effective(conn, config, group_key):
         configured_enabled=configured,
         generation=settings["generation"],
         version=settings["version"],
-        learning_mode=settings["learning_mode"],
         history_window_days=min(
             settings["history_window_days"], config.max_history_days
         ),
@@ -77,10 +75,8 @@ def effective(conn, config, group_key):
         "documents": bool(settings["documents_enabled"]),
     }
     reasons = []
-    if (
-        capabilities["memory"] or capabilities["documents"]
-    ) and not config.embedding_configured:
-        # Lexical and live recall still work; the semantic index does not.
+    if capabilities["documents"] and not config.embedding_configured:
+        # Passive facts use lexical retrieval. Document indexing needs embeddings.
         reasons.append("embedding_unavailable")
     return Effective(
         state="degraded" if reasons else "enabled",

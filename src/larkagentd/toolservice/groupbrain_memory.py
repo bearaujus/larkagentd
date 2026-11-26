@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from ..core.scopes import group_chat_scope
-from ..knowledge.learned import learn
 from ..knowledge.lineage import resolve_sources
 from ..knowledge.memory import Memory
 from ..knowledge.policy import effective
+from ..knowledge.sanitize import sanitize
 from ..knowledge.store import KnowledgeError
 
 PROPOSE_DESCRIPTION = (
-    "Save a durable, reusable decision, procedure or agreed fact for this group after you have "
-    "found it in this group's Lark discussion. Supply the exact group search source IDs. "
-    "The service rechecks every source in Lark. Avoid transient statuses, opinions, secrets, "
-    "personal data and tool output. Report a saved fact only when state=active."
+    "At the end of an enabled group turn, quietly nominate one durable decision, procedure, "
+    "standard or fact that would help this group in future turns. Skip routine questions, "
+    "greetings, temporary status, guesses, instructions directed at the assistant, personal "
+    "data, credentials, private tool results and duplicates. Use evidence written by people in "
+    "this group. With no source_ids, evidence must be a verbatim excerpt from the current "
+    "message. For evidence from group search, use its exact source IDs and an excerpt from "
+    "one of those messages. The Gateway checks the sources after the turn succeeds."
 )
 CORRECT_DESCRIPTION = (
     "Propose a correction to an existing group memory. This creates a new pending revision and does not edit "
@@ -34,9 +37,10 @@ PROPOSE_PARAMETERS = {
                 "project_context",
             ],
         },
-        "source_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "evidence": {"type": "string", "minLength": 1, "maxLength": 500},
+        "source_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
     },
-    "required": ["content", "category"],
+    "required": ["content", "category", "evidence"],
     "additionalProperties": False,
 }
 CORRECT_PARAMETERS = {
@@ -81,29 +85,15 @@ def _valid_args(arguments, required, optional):
     return True
 
 
-def _run(ctx, arguments, method):
+def group_memory_correct(ctx, arguments):
     group_key = _scope(ctx)
     runtime = getattr(ctx, "group_brain", None)
     if group_key is None:
         return {"status": "not_authorized"}
     if runtime is None:
         return {"status": "disabled", "reason": "global_disabled"}
-    required = (
-        {"content", "category"}
-        if method == "propose"
-        else {"memory_id", "replacement", "reason"}
-    )
-    if not _valid_args(arguments, required, {"source_ids"}):
-        return _invalid()
-    if method == "propose":
-        if (
-            not isinstance(arguments["content"], str)
-            or len(arguments["content"]) > 4000
-            or arguments["category"]
-            not in PROPOSE_PARAMETERS["properties"]["category"]["enum"]
-        ):
-            return _invalid()
-    elif any(
+    required = {"memory_id", "replacement", "reason"}
+    if not _valid_args(arguments, required, {"source_ids"}) or any(
         not isinstance(arguments[key], str) or not arguments[key] for key in required
     ):
         return _invalid()
@@ -126,20 +116,6 @@ def _run(ctx, arguments, method):
             and isinstance(row.get("lark_message_id"), str)
         )
     )[:20]
-    if method == "propose":
-        if not source_ids or not verified_source_ids:
-            return {"status": "source_unavailable"}
-        try:
-            return learn(
-                runtime,
-                group_key,
-                ctx.owner.split(":", 1)[-1],
-                arguments,
-                verified_source_ids,
-                state.generation,
-            )
-        except KnowledgeError:
-            return _invalid()
     try:
         with runtime.connection() as conn:
             current = effective(conn, runtime.config, group_key)
@@ -172,8 +148,53 @@ def _run(ctx, arguments, method):
 
 
 def group_memory_propose(ctx, arguments):
-    return _run(ctx, arguments, "propose")
-
-
-def group_memory_correct(ctx, arguments):
-    return _run(ctx, arguments, "correct")
+    group_key = _scope(ctx)
+    if group_key is None:
+        return {"status": "not_authorized"}
+    runtime = ctx.group_brain
+    if runtime is None:
+        return {"status": "disabled"}
+    required = {"content", "category", "evidence"}
+    if not _valid_args(arguments, required, {"source_ids"}):
+        return _invalid()
+    category = arguments["category"]
+    clean = sanitize(arguments["content"])
+    evidence = sanitize(arguments["evidence"], max_chars=500)
+    if (
+        category not in PROPOSE_PARAMETERS["properties"]["category"]["enum"]
+        or not clean.text
+        or clean.reasons
+        or not evidence.text
+        or evidence.reasons
+        or len(arguments.get("source_ids", [])) > 8
+    ):
+        return _invalid()
+    generation = (ctx.conversation or {}).get("passive_generation")
+    if generation is None:
+        return {"status": "disabled"}
+    state = runtime.effective(group_key)
+    if not state.allows("memory") or generation != state.generation:
+        return {"status": "disabled"}
+    sources = arguments.get("source_ids")
+    if sources:
+        try:
+            resolved = resolve_sources(runtime, group_key, sources)
+        except Exception:
+            return {"status": "source_unavailable"}
+        ids = list(dict.fromkeys(row["lark_message_id"] for row in resolved))[:8]
+    else:
+        current = (ctx.turn or {}).get("message_id")
+        ids = [current] if current else []
+    if not ids:
+        return {"status": "source_unavailable"}
+    staged = ctx.job_note and ctx.job_note(
+        passive_candidate={
+            "session_id": ctx.session_id,
+            "content": clean.text,
+            "category": category,
+            "evidence": evidence.text,
+            "ids": ids,
+            "current_only": not sources,
+        }
+    )
+    return {"status": "queued" if staged else "source_unavailable"}

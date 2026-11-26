@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import logging
+
+from ..core.diagnostics import emit, job_fields
 from ..core.scopes import group_chat_scope
+from ..knowledge.learned import activate_candidate, verify_candidate
 from ..knowledge.policy import effective
-from ..knowledge.store import KnowledgeStore
 from ..lark.ui_text import (
-    KNOWLEDGE_DIRECT,
     KNOWLEDGE_DISABLED,
     KNOWLEDGE_HELP,
-    KNOWLEDGE_LEARN_ACK,
-    KNOWLEDGE_LEARN_THREAD,
     KNOWLEDGE_STATUS_DEGRADED,
     KNOWLEDGE_STATUS_ENABLED,
     KNOWLEDGE_STATUS_PAUSED,
@@ -16,44 +16,8 @@ from ..lark.ui_text import (
 )
 
 
-def on_group_message(conn, service, *, chat_id, message_id, thread_id=None):
-    """Queue only an opted-in Group Brain interaction, using verified receive metadata."""
-    scope = group_chat_scope(chat_id)
-    state = effective(conn, service.group_brain, scope)
-    if (
-        not state.serving
-        or state.learning_mode != "interaction"
-        or not (state.allows("recall") or state.allows("memory"))
-    ):
-        return None
-    return KnowledgeStore().enqueue(
-        conn,
-        scope,
-        "ingest_message",
-        f"ingest:{message_id}:{state.generation}",
-        state.generation,
-        ref_payload={
-            "message_id": message_id,
-            "thread_id": thread_id or None,
-            "reason": "interaction",
-        },
-    )
-
-
-def knowledge_command(
-    conn,
-    service,
-    text,
-    *,
-    chat_id,
-    group,
-    message_id,
-    thread_ref=None,
-    thread=None,
-):
+def knowledge_command(conn, service, text, *, chat_id):
     """Handle Gateway-owned /knowledge commands without passing their text to Hermes."""
-    if not group:
-        return KNOWLEDGE_DIRECT
     scope = group_chat_scope(chat_id)
     state = effective(conn, service.group_brain, scope)
     parts = text.strip().split(maxsplit=1)
@@ -73,25 +37,50 @@ def knowledge_command(
         if state.state == "enabled":
             return KNOWLEDGE_STATUS_ENABLED
         return KNOWLEDGE_DISABLED
-    if subcommand == "learn":
-        if not state.serving or not (state.allows("recall") or state.allows("memory")):
-            return KNOWLEDGE_DISABLED
-        if not thread_ref:
-            return KNOWLEDGE_LEARN_THREAD
-        KnowledgeStore().enqueue(
-            conn,
-            scope,
-            "ingest_message",
-            f"ingest:{thread_ref}:{state.generation}",
-            state.generation,
-            ref_payload={
-                "message_id": thread or message_id,
-                "thread_id": thread_ref,
-                "reason": "learn",
-            },
-        )
-        return KNOWLEDGE_LEARN_ACK
     return KNOWLEDGE_HELP
+
+
+def prepare_passive_learning(service, job, session_id):
+    """Fetch evidence only for the attempt whose reply actually finished."""
+    runtime = service.access.knowledge_runtime
+    if runtime is None or runtime.source is None:
+        return None
+    scope = group_chat_scope(job["payload"].get("chat"))
+    if scope is None:
+        return None
+    with service.store.engine.connect() as conn:
+        payload = service.store.job_payload(conn, job["id"]) or {}
+        candidate = payload.get("passive_candidate")
+        generation = payload.get("passive_generation")
+        if not candidate or candidate["session_id"] != session_id:
+            return None
+        state = effective(conn, runtime.config, scope)
+        if not state.allows("memory") or state.generation != generation:
+            return None
+    owner = job["owner"].partition(":")[2]
+    live = verify_candidate(runtime, scope, owner, candidate)
+    if live is None:
+        emit("knowledge.passive", **job_fields(job), outcome="source_unavailable")
+        return None
+    return runtime, scope, owner, candidate, live, generation
+
+
+def finish_passive_learning(conn, job, candidate):
+    if candidate is None:
+        return
+    try:
+        with conn.begin_nested():
+            outcome = activate_candidate(conn, *candidate)
+    except Exception as exc:
+        emit(
+            "knowledge.passive",
+            logging.WARNING,
+            **job_fields(job),
+            outcome="save_failed",
+            error_type=type(exc).__name__,
+        )
+        return
+    emit("knowledge.passive", **job_fields(job), outcome=outcome)
 
 
 def start_knowledge_workers(config, store, client, stop, index=None):

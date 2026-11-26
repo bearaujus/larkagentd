@@ -1,5 +1,4 @@
 import hashlib
-import json
 import logging
 import re
 import secrets
@@ -7,7 +6,7 @@ import time
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from ..core import group_actions
 from ..core.auth import AuthError, transient_auth_error
@@ -23,17 +22,18 @@ from ..core.store import (
     turns,
 )
 from ..knowledge.models import GroupBrainConfig
+from ..knowledge.policy import effective as group_brain_effective
 from ..knowledge.policy import still_valid as group_brain_valid
 from ..knowledge.policy import store as group_brain_store
 from ..lark import usage_text
 from ..lark.attachments import resolve as resolve_attachments
 from ..lark.attachments import thread_images
-from ..lark.card import preview_card
+from ..lark.card import confirmation_fallback, reply_card
 from ..lark.card_delivery import deliver_card
 from ..lark.cards import choice_pages, json_card
 from ..lark.inbound import IMAGE, takes_over, wants_setup
 from ..lark.progress import Progress
-from ..lark.render import answer_room, attach_code, has_code, with_blocks
+from ..lark.render import answer_room, attach_code, with_blocks
 from ..lark.ui_text import (
     AGENT_FAILURES,
     BUSY_REPLY,
@@ -51,11 +51,8 @@ from ..lark.ui_text import (
     NOTHING_RUNNING,
     QUOTA_REACHED,
     RESUME_REQUEST,
-    RESUMING,
     SETUP_GROUP_REQUIRED,
     SKILLS_QUESTION,
-    STEER_ACK,
-    STEER_ELAPSED,
     STOP_FAILED,
     STOPPING,
     TAKEOVER_REQUEST,
@@ -66,7 +63,11 @@ from ..lark.ui_text import (
 )
 from .access import Access, AccessError
 from .hermes import AgentError
-from .knowledge_hooks import knowledge_command, on_group_message
+from .knowledge_hooks import (
+    finish_passive_learning,
+    knowledge_command,
+    prepare_passive_learning,
+)
 
 
 def sanitize(text):
@@ -250,16 +251,6 @@ class Service:
         )
         return GROUP_BRAIN_SUPPRESSED, None
 
-    def group_brain_used(self, job_id):
-        """True once a Group Brain tool returned evidence in this turn (or when that cannot be told:
-        the answer is then held back, never posted). Interim sentences are not posted after it."""
-        try:
-            with self.store.engine.connect() as conn:
-                noted = self.store.job_payload(conn, job_id) or {}
-        except Exception:
-            return True
-        return bool(noted.get("gb_group"))
-
     def group_brain_send_valid(self, payload):
         """False when a queued answer built from group knowledge may no longer be posted."""
         try:
@@ -378,6 +369,10 @@ class Service:
         answer_to=None,
         thread=False,
         gb=None,
+        single_reply=False,
+        usage_footer="",
+        fallback_card=None,
+        attachments=(),
     ):
         guard = {"gb_group": gb[0], "gb_generation": gb[1]} if gb else {}
         self.store.add_job(
@@ -395,6 +390,16 @@ class Service:
                 "card_terminal": bool(state and state.get("card_closed")),
                 "card": json_card(state, note) if state is not None else None,
                 "preview_card": preview_card,
+                **(
+                    {
+                        "single_reply": True,
+                        "usage_footer": usage_footer,
+                        "fallback_card": fallback_card,
+                        "attachments": list(attachments),
+                    }
+                    if single_reply
+                    else {}
+                ),
                 **({"answer_to": answer_to} if answer_to else {}),
             },
         )
@@ -427,15 +432,6 @@ class Service:
         """(answer, files): the answer with the code blocks that do not fit in one message sent
         as files instead, a preview of each staying in the message."""
         return attach_code(reply, answer_room([p["text"] for p in previews]))
-
-    @staticmethod
-    def table_card(reply, previews):
-        """The table card, or None: a layout problem must never lose the answer."""
-        try:
-            return preview_card(reply, previews)
-        except Exception:
-            emit("card.build_failed", logging.WARNING)
-            return None
 
     def ensure_card_run(self, state):
         runs = state.setdefault("card_runs", {})
@@ -678,28 +674,11 @@ class Service:
                         self.reply(conn, owner, chat, NOT_ALLOWED, message_id)
                     return
                 state["last_group"] = chat
-            if group and not text.lstrip().startswith("/"):
-                on_group_message(
-                    conn,
-                    self,
-                    chat_id=chat,
-                    message_id=message_id,
-                    thread_id=thread_ref,
-                )
             if group and (
                 text.strip().lower() == "/knowledge"
                 or text.strip().lower().startswith("/knowledge ")
             ):
-                reply = knowledge_command(
-                    conn,
-                    self,
-                    text,
-                    chat_id=chat,
-                    group=True,
-                    message_id=message_id,
-                    thread_ref=thread_ref,
-                    thread=thread,
-                )
+                reply = knowledge_command(conn, self, text, chat_id=chat)
                 self.reply(conn, owner, chat, reply, message_id)
                 return
             if dashboard_login:
@@ -1067,50 +1046,29 @@ class Service:
         )
         return "Confirmed. I will continue in this thread."
 
-    def post_confirmation(self, conn, job):
+    def pending_confirmation(self, conn, job):
         payload = self.store.job_payload(conn, job["id"]) or {}
         identifier = payload.get("confirmation_id")
         if not identifier:
-            return
-        owner, chat = job["owner"], payload["chat"]
-        row = group_actions.pending(conn, owner, chat, identifier)
+            return None
+        row = group_actions.pending(conn, job["owner"], payload["chat"], identifier)
         if not row:
-            return
+            return None
         action = self.vault.open("action:" + identifier, row["sealed"])
-        label = action["label"]
-        card = json.dumps(
-            {
-                "header": {
-                    "title": {"tag": "plain_text", "content": "Confirm this action"}
-                },
-                "elements": [
-                    {"tag": "div", "text": {"tag": "plain_text", "content": label}},
-                    {
-                        "tag": "action",
-                        "actions": [
-                            {
-                                "tag": "button",
-                                "text": {"tag": "plain_text", "content": "Confirm"},
-                                "type": "primary",
-                                "value": {
-                                    "action": "confirm_group_action",
-                                    "id": identifier,
-                                },
-                            },
-                        ],
-                    },
-                ],
-            }
-        )
-        self.out(
-            conn,
-            owner,
-            chat,
-            "Confirmation is needed to continue.",
-            reply_to=payload["message_id"],
-            thread=True,
-            preview_card=card,
-        )
+        return {
+            "label": action["label"],
+            "value": {"action": "confirm_group_action", "id": identifier},
+        }
+
+    def remember_activity(self, job, message, started_at):
+        with self.store.engine.begin() as conn:
+            if self.store.owns(conn, job):
+                self.store.note_job(
+                    conn,
+                    job["id"],
+                    activity_message=message,
+                    activity_started_at=started_at,
+                )
 
     def resolve(self, owner, version, min_seconds=60):
         """The owner's credentials, renewed silently when they expire within min_seconds.
@@ -1229,6 +1187,40 @@ class Service:
             )
         return changes, None
 
+    def checked_delivery(self, job, payload):
+        if not payload.get("gb_group") or self.group_brain_send_valid(payload):
+            return payload
+        emit("knowledge.delivery_suppressed", logging.WARNING, **job_fields(job))
+        return dict(
+            payload,
+            text=GROUP_BRAIN_SUPPRESSED,
+            file=None,
+            preview_card=None,
+            fallback_card=None,
+            usage_footer="",
+            attachments=[],
+            attachment_keys=[],
+            gb_group=None,
+        )
+
+    def send_reply(self, job, transport):
+        payload = self.checked_delivery(job, job["payload"])
+        attachments = payload.get("attachments") or ()
+        keys = list(payload.get("attachment_keys") or ())
+        for file in attachments[len(keys) :]:
+            keys.append(transport.upload_file(file))
+            with self.store.engine.begin() as conn:
+                if not self.store.owns(conn, job):
+                    return
+                self.store.note_job(conn, job["id"], attachment_keys=keys)
+            # Retry handling rebases from this object, so retain each committed upload.
+            job["payload"] = dict(job["payload"], attachment_keys=keys)
+        if attachments:
+            payload = self.checked_delivery(job, dict(payload, attachment_keys=keys))
+        transport.send(payload, job["id"])
+        with self.store.user(job["owner"]) as (conn, _):
+            self.store.finish(conn, job)
+
     def work(self, job, transport):
         owner = job["owner"]
         with self.store.user(owner) as (conn, state):
@@ -1302,22 +1294,7 @@ class Service:
             self.deliver_card(job, transport)
             return
         if job["kind"] == "send":
-            payload = job["payload"]
-            if payload.get("gb_group") and not self.group_brain_send_valid(payload):
-                # Built from a group's knowledge, and the group no longer allows it: say so instead.
-                emit(
-                    "knowledge.delivery_suppressed", logging.WARNING, **job_fields(job)
-                )
-                payload = dict(
-                    payload,
-                    text=GROUP_BRAIN_SUPPRESSED,
-                    file=None,
-                    preview_card=None,
-                    gb_group=None,
-                )
-            transport.send(payload, job["id"])
-            with self.store.user(owner) as (conn, _):
-                self.store.finish(conn, job)
+            self.send_reply(job, transport)
             return
         if job["kind"] == "stop":
             self.stop_run(job)
@@ -1384,6 +1361,13 @@ class Service:
                             state.pop("busy", None)
                         self.store.finish(conn, job)
                         return
+                activity_start = job["payload"].get("activity_started_at")
+                if activity_start is None and started:
+                    activity_start = conn.scalar(
+                        select(func.min(turns.c.created)).where(
+                            turns.c.job_id == job["id"]
+                        )
+                    )
                 job["payload"] = dict(job["payload"], admission_started=True)
                 if governance_snapshot:
                     job["payload"]["governance"] = governance_snapshot
@@ -1411,7 +1395,15 @@ class Service:
                 lark_in_group=bool(
                     group_tools
                     and group_tools.intersection(
-                        {"lark_read", "lark_file_read", "lark_file_edit"}
+                        {"lark_read", "lark_image", "lark_file_read", "lark_file_edit"}
+                    )
+                ),
+                owner=owner,
+                remote=remote,
+                lark_thread=bool(
+                    group_tools
+                    and group_tools.intersection(
+                        {"lark_read", "lark_image", "lark_file_read", "lark_file_edit"}
                     )
                 ),
             )
@@ -1505,6 +1497,7 @@ class Service:
                     )
                 if governance_snapshot and governance_snapshot["effort"] is not None:
                     request["reasoning_effort"] = governance_snapshot["effort"]
+            image_notice = ""
             if resolved.images and self.can_read_images(model) is False:
                 # The model in use cannot read images: leave them out, tell the person, and
                 # tell the model so it does not pretend it saw them.
@@ -1520,26 +1513,23 @@ class Service:
                     or resolved.quote
                     or resolved.forwarded
                 )
-                with self.store.user(owner) as (conn, state):
-                    if self.store.owns(conn, job):
-                        self.out(
-                            conn,
-                            owner,
-                            chat,
-                            images_skipped(
-                                count,
-                                group,
-                                []
-                                if group or self.governance
-                                else self.vision_choices(),
-                            ),
-                            reply_to=job["payload"]["message_id"],
-                            thread=True,
-                        )
-                        if nothing_else:
+                image_notice = images_skipped(
+                    count,
+                    group,
+                    [] if group or self.governance else self.vision_choices(),
+                )
+                if nothing_else:
+                    with self.store.user(owner) as (conn, state):
+                        if self.store.owns(conn, job):
+                            self.reply(
+                                conn,
+                                owner,
+                                chat,
+                                image_notice,
+                                job["payload"]["message_id"],
+                            )
                             state.pop("busy", None)
                             self.store.finish(conn, job)
-                if nothing_else:
                     self.forget(job)
                     return
             urls, hidden = thread_images(
@@ -1573,35 +1563,52 @@ class Service:
                             )
             if resolved.lark_links:
                 request["lark_links"] = True
-            if resolved.lark_allowed:
-                # The links the user wrote: the tool service lets `lark_read` open only these.
-                # Only the worker that still holds the job writes it; without it the tool refuses.
+            if resolved.lark_thread_links:
+                request["lark_thread_links"] = [
+                    link.url for link in resolved.lark_thread_links
+                ]
+            if resolved.lark_allowed or resolved.lark_thread_links:
+                # Keep earlier references separate so edits through them require confirmation.
                 with self.store.user(owner) as (conn, _):
                     if self.store.owns(conn, job):
                         self.store.note_job(
-                            conn, job["id"], lark_links=resolved.lark_allowed
+                            conn,
+                            job["id"],
+                            lark_links=resolved.lark_allowed,
+                            lark_thread_links=[
+                                link.token for link in resolved.lark_thread_links
+                            ],
                         )
             if self.agent is None:
                 raise RuntimeError("Gateway agent is required")
+            activity_start = (
+                activity_start if activity_start is not None else time.time()
+            )
             progress = Progress(
                 transport,
                 chat,
                 job["payload"]["message_id"],
                 job_fields(job),
-                redact=sanitize,
-                private=True,
+                key=job["id"],
+                previous=job["payload"].get("activity_message"),
+                remember=lambda message: self.remember_activity(
+                    job, message, activity_start
+                ),
+                prior_elapsed=max(0, time.time() - activity_start),
                 lost=job["lost"].is_set if job.get("lost") else None,
-                hold=(lambda: self.group_brain_used(job["id"])) if group else None,
             )
             progress.start()
-            answered = False
+            answered, failure = False, None
             try:
                 session_id, reply = self.ask_agent(
                     job, owner, request, progress, chat=chat
                 )
                 answered = True
+            except AgentError as exc:
+                failure = exc.kind
+                raise
             finally:
-                progress.finish(ok=answered)
+                progress.finish(ok=answered, failure=failure)
                 self.record_usage(
                     job,
                     owner,
@@ -1611,6 +1618,18 @@ class Service:
                     override=bool(model) and not self.governance,
                     model=model,
                 )
+            learning = None
+            if group:
+                try:
+                    learning = prepare_passive_learning(self, job, session_id)
+                except Exception as exc:
+                    emit(
+                        "knowledge.passive",
+                        logging.WARNING,
+                        **job_fields(job),
+                        outcome="verification_failed",
+                        error_type=type(exc).__name__,
+                    )
             with self.store.user(owner) as (conn, state):
                 if not self.store.owns(conn, job):
                     return
@@ -1633,78 +1652,55 @@ class Service:
                     # Preview rows were never seen by the model: they are attached
                     # here, from our own store, and are not saved in history.
                     previews, files = self.take_previews(conn, owner, job, session_id)
-                    footer = self.token_footer(
-                        conn,
-                        owner,
-                        job,
-                        in_group=True,
+                    footer = self.token_footer(conn, owner, job, in_group=True)
+                    sign_in = self.prepare_reply_sign_in(conn, owner, state, job)
+                    response = "\n\n".join(
+                        part for part in (image_notice, reply, sign_in) if part
                     )
-                    answer, code_files = self.fit_answer(reply, previews)
-                    attach = footer if footer and not has_code(answer) else ""
+                    answer, code_files = self.fit_answer(response, previews)
+                    body = with_blocks(answer, [p["text"] for p in previews])
+                    confirmation = self.pending_confirmation(conn, job)
+                    attachments = [*code_files, *files]
+                    reply_to = job["payload"]["message_id"]
+                    reply_chat = job["payload"].get("chat") or state["chat"]
+                    try:
+                        card = reply_card(answer, body, previews, footer, confirmation)
+                    except (KeyError, ValueError, TypeError) as exc:
+                        emit(
+                            "card.build_failed",
+                            logging.WARNING,
+                            error_type=type(exc).__name__,
+                        )
+                        card = None
                     self.out(
                         conn,
                         owner,
-                        job["payload"].get("chat") or state["chat"],
-                        with_blocks(answer, [p["text"] for p in previews])
-                        + (f"\n\n{attach}" if attach else ""),
-                        reply_to=job["payload"]["message_id"],
+                        reply_chat,
+                        body,
+                        reply_to=reply_to,
                         thread=True,
-                        preview_card=self.table_card(answer, previews),
+                        preview_card=card,
+                        single_reply=True,
+                        usage_footer=footer,
+                        fallback_card=confirmation_fallback(
+                            answer, footer, confirmation
+                        ),
                         answer_to=owner.partition(":")[2] if group else None,
                         gb=gb,
+                        attachments=attachments if confirmation is None else (),
                     )
-                    if footer and not attach:
-                        # Own message: under an answer that holds code the footer
-                        # must not be inside the code block.
-                        self.out(
+                    if confirmation and attachments:
+                        self.out_files(
                             conn,
                             owner,
-                            job["payload"].get("chat") or state["chat"],
-                            footer,
-                            reply_to=job["payload"]["message_id"],
+                            reply_chat,
+                            attachments,
+                            reply_to=reply_to,
                             thread=True,
+                            gb=gb,
                         )
-                    self.out_files(
-                        conn,
-                        owner,
-                        job["payload"].get("chat") or state["chat"],
-                        [*code_files, *files],
-                        reply_to=job["payload"]["message_id"],
-                        thread=True,
-                        gb=gb,
-                    )
-                    self.post_confirmation(conn, job)
+                    finish_passive_learning(conn, job, learning)
                     self.store.end_turn(conn, session_id, "done")
-                    expired = state.pop("sign_in_expired", False)
-                    if self.cloud is not None and self.store.turn_needs_login(
-                        conn, job["id"]
-                    ):
-                        if not state.get("credential"):
-                            # The sign-in will continue this request by itself, in the
-                            # chat it was asked in.
-                            state["resume"] = dict(
-                                message_id=job["payload"]["message_id"],
-                                thread=job["payload"].get("thread"),
-                                at=time.time(),
-                                chat=job["payload"].get("chat"),
-                                group=bool(job["payload"].get("group")),
-                            )
-                            if job["payload"].get("group"):
-                                self.reply(
-                                    conn,
-                                    owner,
-                                    job["payload"]["chat"],
-                                    GROUP_SIGN_IN if state.get("chat") else GROUP_SETUP,
-                                    job["payload"]["message_id"],
-                                )
-                        if state.get("chat"):
-                            self.queue_setup(
-                                conn,
-                                owner,
-                                state,
-                                job["payload"]["chat"],
-                                expired=expired,
-                            )
                     state.pop("busy", None)
                     self.store.finish(conn, job)
             self.forget(job)
@@ -1873,10 +1869,6 @@ class Service:
             self.store.finish(conn, job)
         emit("stop.requested", **job_fields(job), accepted=accepted)
 
-    steer_ack_gap = (
-        30  # seconds between two "Redirected" acknowledgements for one person
-    )
-
     def can_read_images(self, model):
         """True or False when VISION_MODELS names the models that read images, None when it does not
         (unknown: images are sent and a failure with one is reported). `model` is the person's pick
@@ -1955,14 +1947,14 @@ class Service:
 
         Like a stop, it waits briefly for a run that has not started yet. When Hermes takes the
         message it also goes into the chat history (the turn's own answer is saved later, so the
-        order stays right) and the person is told once in a while that the run was redirected.
+        order stays right). The running activity card shows the accepted update.
         When Hermes does not take it (the run ended, or is not accepting input) the person gets
         the busy reply, as before.
         """
         owner, payload = job["owner"], job["payload"]
         target = payload["target"]
         deadline = time.monotonic() + self.stop_wait
-        accepted, seconds = False, 0.0
+        accepted = False
         while self.agent:
             with self.store.engine.begin() as conn:
                 if self.governance and self.access.admission(
@@ -1972,7 +1964,6 @@ class Service:
                 running = self.store.running_turn(conn, target, owner)
             if running:
                 accepted = self.agent.steer(running[0], payload["text"])
-                seconds = running[1]
                 break
             with self.store.user(owner) as (_, state):
                 busy = state.get("busy") == target
@@ -2000,19 +1991,6 @@ class Service:
                     self.store.message(conn, owner, item)
                 else:
                     state["steers"] = [*state.get("steers", []), item][-STEERS_KEPT:]
-                    if time.time() - state.get("steer_ack", 0) >= self.steer_ack_gap:
-                        state["steer_ack"] = time.time()
-                        minutes = int(seconds // 60)
-                        detail = (
-                            STEER_ELAPSED.format(minutes=minutes) if minutes else ""
-                        )
-                        self.reply(
-                            conn,
-                            owner,
-                            chat,
-                            STEER_ACK.format(detail=detail),
-                            payload["message_id"],
-                        )
             self.store.finish(conn, job)
         emit("steer.requested", **job_fields(job), accepted=accepted)
 
@@ -2027,6 +2005,15 @@ class Service:
         with self.store.engine.begin() as conn:
             turn = self.store.latest_turn(conn, job["id"])
             session_id = turn["session_id"] if turn else f"{job['id']}:1"
+            if turn is None and request.get("group"):
+                runtime = self.access.knowledge_runtime
+                scope = group_chat_scope(chat)
+                if runtime is not None and runtime.source is not None and scope:
+                    policy = group_brain_effective(conn, runtime.config, scope)
+                    if policy.allows("memory"):
+                        request["passive_learning"] = self.store.note_job(
+                            conn, job["id"], passive_generation=policy.generation
+                        )
             body = turn["request"] if turn else self.agent.build(request)
             self.store.start_turn(
                 conn,
@@ -2054,6 +2041,9 @@ class Service:
         except AgentError as exc:
             if exc.kind != "unknown_execution" or session_id.endswith(":2"):
                 raise
+            emit("agent.recovering", **job_fields(job), reason=exc.kind)
+            if progress:
+                progress.event("restarted")
             with self.store.engine.begin() as conn:
                 self.store.end_turn(conn, session_id, "unknown")
                 session_id = f"{job['id']}:2"
@@ -2195,12 +2185,34 @@ class Service:
             return None
         return version
 
+    def prepare_reply_sign_in(self, conn, owner, state, job):
+        """Offer private setup and put its guidance in the group answer."""
+        expired = state.pop("sign_in_expired", False)
+        if self.cloud is None or not self.store.turn_needs_login(conn, job["id"]):
+            return ""
+        payload = job["payload"]
+        notice = ""
+        if not state.get("credential"):
+            state["resume"] = dict(
+                message_id=payload["message_id"],
+                thread=payload.get("thread"),
+                at=time.time(),
+                chat=payload.get("chat"),
+                group=bool(payload.get("group")),
+            )
+            if payload.get("group"):
+                notice = GROUP_SIGN_IN if state.get("chat") else GROUP_SETUP
+        if state.get("chat"):
+            self.queue_setup(conn, owner, state, payload["chat"], expired=expired)
+        return notice
+
     def token_footer(self, conn, owner, job, in_group):
         """The line under an answer: what this request used. Under an answer shown to a group
         it is this request only; the month so far is a person's own business."""
         if not self.token_summary:
             return ""
         used = self.store.usage_job(conn, job["id"])
+        used["attempts"] = len(self.store.job_sessions(conn, job["id"]))
         if self.governance:
             return usage_text.footer(used)
         month = (
@@ -2268,13 +2280,6 @@ class Service:
             ),
         )
         state["busy"] = job
-        self.reply(
-            conn,
-            owner,
-            waiting.get("chat") or state["chat"],
-            RESUMING,
-            waiting["message_id"],
-        )
         emit("request.resumed", actor=actor_ref(owner), request_id=job)
         return True
 
@@ -2343,6 +2348,7 @@ class Service:
                             str(error),
                             "Couldn't process that message. Please try again.",
                         )
+                    footer = self.token_footer(conn, job["owner"], job, in_group=True)
                     self.out(
                         conn,
                         job["owner"],
@@ -2350,6 +2356,12 @@ class Service:
                         message,
                         reply_to=job["payload"].get("message_id"),
                         thread=bool(job["payload"].get("message_id")),
+                        single_reply=True,
+                        preview_card=reply_card(message, message, [], footer, None),
+                        usage_footer=footer,
+                        answer_to=job["owner"].partition(":")[2]
+                        if job["payload"].get("group")
+                        else None,
                     )
                 self.store.finish(conn, job)
                 return

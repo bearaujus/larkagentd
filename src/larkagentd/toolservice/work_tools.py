@@ -16,7 +16,7 @@ def _files(ctx):
 
 def file_read(ctx, args):
     files = _files(ctx)
-    link = files.shared_link(ctx, args["url"])
+    link = files.shared_link(ctx, args["url"], allow_history=True)
     return files.read(ctx, link, args.get("sheet_id"), args.get("range"))
 
 
@@ -26,7 +26,7 @@ def file_create(ctx, args):
 
 def file_edit(ctx, args):
     files = _files(ctx)
-    link = files.shared_link(ctx, args["url"])
+    link = files.shared_link(ctx, args["url"], allow_thread=True)
     if args["action"] == "delete_matching_rows":
         return files.request_delete(ctx, link, args)
     return files.edit(ctx, link, args)
@@ -58,6 +58,13 @@ def run_confirmed_action(ctx, _args):
         raise LarkError("confirmation_expired")
     if action["kind"] == "delete_rows" and ctx.allowed("lark_file_edit"):
         return _files(ctx).delete_rows(ctx, action["data"])
+    if action["kind"] == "file_edit" and ctx.allowed("lark_file_edit"):
+        data = action["data"]
+        link = parse_link(data["url"])
+        if not link:
+            raise LarkError("bad_link")
+        ctx.lark_allowed = frozenset({link.token})
+        return _files(ctx).edit(ctx, link, data, confirmed=True)
     if action["kind"] == "web_search" and ctx.web and ctx.allowed("request_web_search"):
         try:
             return ctx.web.search(action["data"]["query"])

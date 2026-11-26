@@ -3,8 +3,6 @@
 import json
 import re
 
-from .ui_text import SPINNER
-
 MAX_CHARS = 8000
 MAX_PARTS = 5  # messages one answer may take
 PART_ROOM = 12  # kept free in a part for its "(2/5)" line
@@ -21,9 +19,16 @@ def open_fence(text):
     return opener
 
 
-def has_code(text):
-    """True when the text holds a fenced code block (or the start of one)."""
-    return any(FENCE.match(line) for line in text.splitlines())
+def close_fence(text):
+    opener = open_fence(text)
+    return f"{text}\n{opener}" if opener else text
+
+
+def final_post(text, footer):
+    """Bound the plain or rich-post fallback to one message and keep usage outside code."""
+    room = MAX_CHARS - len(footer) - 160
+    text = close_fence(shorten(text, room))
+    return f"{text}\n\n{footer}" if footer else text
 
 
 def shorten(text, limit=MAX_CHARS):
@@ -298,13 +303,18 @@ def inert_mentions(text):
 def addressed_card(card, mention):
     data = json.loads(inert_mentions(card))
     if mention:
-        data["body"]["elements"].insert(
-            0, {"tag": "markdown", "content": f"<at id={mention}></at>"}
+        elements = data["body"]["elements"] if "body" in data else data["elements"]
+        tagged = f"<at id={mention}></at>"
+        element = (
+            {"tag": "markdown", "content": tagged}
+            if "body" in data
+            else {"tag": "div", "text": {"tag": "lark_md", "content": tagged}}
         )
+        elements.insert(0, element)
     return json.dumps(data, ensure_ascii=False)
 
 
-def post(text, mention=None):
+def post(text, mention=None, attachments=()):
     """A post body with one markdown element per prose run and per fenced code block.
 
     Lark's markdown renderer can swallow text that follows a fence inside one large
@@ -331,18 +341,10 @@ def post(text, mention=None):
     rows = rows or [[{"tag": "md", "text": text}]]
     if mention:
         rows.insert(0, [{"tag": "at", "user_id": mention}])
-    return json.dumps({"zh_cn": {"content": rows}}, ensure_ascii=False)
-
-
-def status_post(text, image_key=None):
-    """The status line as a post: with an image key, that animated image stands in front of the
-    words where the sand clock was; without one, the words alone (the text is kept as given, so
-    "Finished" and "Stopped early" keep their own emoji)."""
-    words = text.removeprefix(SPINNER).strip() if image_key else text
-    row = [{"tag": "text", "text": (" " if image_key else "") + words}]
-    if image_key:
-        row.insert(0, {"tag": "img", "image_key": image_key})
-    return json.dumps({"zh_cn": {"content": [row]}}, ensure_ascii=False)
+    content = {"zh_cn": {"content": rows}}
+    if attachments:
+        content["files"] = [{"key": key} for key in attachments]
+    return json.dumps(content, ensure_ascii=False)
 
 
 def plain(text, mention=None):

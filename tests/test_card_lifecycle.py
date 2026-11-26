@@ -48,26 +48,15 @@ class Transport:
             raise RuntimeError("Lark reaction failed (code=1)")
         self.progress.append(event)
 
-    def react(self, message_id):
-        self._progress("react", message_id)
-        return "reaction-1"
+    def upload_file(self, file):
+        return "file_" + file["name"]
 
-    def unreact(self, message_id, reaction_id):
-        self._progress("unreact", message_id, reaction_id)
+    def open_activity(self, chat, reply_to, key, card, text):
+        self._progress("open", chat, reply_to, key, json.loads(card))
+        return key, "interactive"
 
-    def status(self, message_id, text, working=False):
-        self._progress("status", message_id, text)
-        return "status-1"
-
-    def edit(self, message_id, text, working=False):
-        self._progress("edit", message_id, text)
-
-    def edit_note(self, message_id, text):
-        self._progress("edit_note", message_id, text)
-
-    def note(self, chat, text, reply_to=None):
-        self._progress("note", chat, text, reply_to)
-        return "note-1"
+    def update_activity(self, message_id, kind, card, text):
+        self._progress("update", message_id, kind, json.loads(card))
 
 
 def ready_jobs(store, kind):

@@ -162,3 +162,32 @@ def test_a_question_with_inline_code_is_read_as_a_question_not_rejected():
         message_event("post", json.dumps(post))
         == "when can I move the `p_example.demo.sample_table` schedule earlier?"
     )
+
+
+def test_planned_restart_gates_new_turns_and_waits_for_reply_delivery(
+    tmp_path, monkeypatch
+):
+    from larkagentd.gateway import drain
+    from larkagentd.gateway.runtime_status import RuntimeStatus
+
+    marker = tmp_path / "drain"
+    monkeypatch.setattr(drain, "MARKER", marker)
+    status = RuntimeStatus()
+    with status.agent_work() as admitted:
+        assert admitted
+        marker.touch()
+        assert status.snapshot()["active_turns"] == 1
+        with status.agent_work() as next_turn:
+            assert not next_turn
+    assert status.snapshot()["active_turns"] == 0
+    tick = [0]
+    assert drain.wait_until_idle(
+        status.snapshot,
+        lambda: tick[0] < 2,
+        clock=lambda: tick[0],
+        sleep=lambda seconds: tick.__setitem__(0, tick[0] + seconds),
+    )
+    assert tick[0] == 3
+    marker.unlink()
+    with status.agent_work() as next_turn:
+        assert next_turn

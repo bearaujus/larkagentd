@@ -46,7 +46,7 @@ def test_parses_raw_messages_and_counts_bad_records():
             },
             {
                 "id": "om_example0002",
-                "create_time": 1700000000,
+                "create_time": "2023-11-14 22:13",
                 "content": '{"text":"second"}',
                 "msg_type": "text",
             },
@@ -66,6 +66,7 @@ def test_parses_raw_messages_and_counts_bad_records():
     assert len(page.messages) == 2
     assert page.messages[0].created_at.timestamp() == 1700000000
     assert page.messages[0].text == "heading body"
+    assert page.messages[1].created_at.timestamp() == 1699999980
     assert page.messages[1].sender_id is None
     assert source.skipped == 2
     assert page.next_page_token == "next_1" and not page.complete

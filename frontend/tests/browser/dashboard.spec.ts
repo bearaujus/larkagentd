@@ -691,7 +691,6 @@ test("dashboard screenshots with synthetic fixtures", async ({
       json: {
         group_name: "Platform Engineering",
         learning: true,
-        mode: "explicit",
         state: "enabled",
         next: null,
         records: [
@@ -956,12 +955,11 @@ test("Group Brain enablement requires references and explicit sharing acknowledg
   await expect(enable).toBeFocused();
   await page.keyboard.press("Space");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("save facts from cited messages");
+  await expect(dialog).toContainText("save useful facts");
   await expect(dialog).toContainText("Only members of this group");
   await expect(dialog).toContainText(
     "Source-backed facts can become active automatically",
   );
-  await expect(dialog).toContainText("Learning mode: explicit");
   const confirm = dialog.getByRole("button", { name: "Confirm enablement" });
   await expect(confirm).toBeDisabled();
   await dialog.getByLabel("Notice reference").fill("notice_example");
@@ -972,6 +970,10 @@ test("Group Brain enablement requires references and explicit sharing acknowledg
   await expect(confirm).toBeEnabled();
   await confirm.click();
   await expect(enable).toBeChecked();
+  await expect(
+    page.getByText("Passive learning.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".group-brain").getByRole("radio")).toHaveCount(0);
   await page
     .locator(".group-brain")
     .getByRole("button", { name: "Save learning settings" })
@@ -1401,7 +1403,6 @@ test("group facts show the cited message and require confirmation before removal
       json: {
         group_name: "Test group",
         state: "enabled",
-        mode: "explicit",
         learning: true,
         next: null,
         records: retired ? [] : [fact],

@@ -289,8 +289,15 @@ class Recall:
         chat_id = group_key.removeprefix("group:")
         source = self.runtime.source
         messages, token, reached_start, pages = [], None, False, 0
+        page_failed = False
         while pages < MAX_PAGES:
-            page = source.list_messages(chat_id, page_token=token, limit=PAGE_SIZE)
+            try:
+                page = source.list_messages(chat_id, page_token=token, limit=PAGE_SIZE)
+            except SourceError:
+                if pages == 0:
+                    raise
+                page_failed = True
+                break
             pages += 1
             for message in page.messages:
                 if message.chat_id != chat_id:
@@ -299,10 +306,13 @@ class Recall:
                     reached_start = True
                 elif message.created_at < end:
                     messages.append(message)
-            token = page.next_page_token
-            if reached_start or not token or page.complete:
-                reached_start = reached_start or page.complete or not token
+            if reached_start or page.complete:
+                reached_start = True
                 break
+            if not page.next_page_token or page.next_page_token == token:
+                page_failed = True
+                break
+            token = page.next_page_token
         clean, skipped = self.clean(messages)
         known_complete = (
             self.expand_threads(chat_id, clean, keywords, identifiers)
@@ -319,7 +329,9 @@ class Recall:
         coverage = {
             "mode": "live",
             "complete": bool(complete),
-            "reason": None
+            "reason": "page_unavailable"
+            if page_failed
+            else None
             if complete
             else self.why_partial(reached_start, discussions),
             "window": {
@@ -470,7 +482,9 @@ class Recall:
 
     # --- one discussion ---
 
-    def get_discussion(self, group_key, requester_id, arguments, now=None):
+    def get_discussion(
+        self, group_key, requester_id, arguments, now=None, *, observe_files=None
+    ):
         state, blocked = self.gate(group_key)
         if blocked:
             return {k: v for k, v in blocked.items() if k != "results"}
@@ -530,11 +544,14 @@ class Recall:
                         message.sender_id, f"Person {len(labels) + 1}"
                     )
                 )
+                words = scan["texts"][mid]
+                if observe_files is not None and message.sender_type == "user":
+                    observe_files(mid, words)
                 lines.append(
                     {
                         "person": who,
                         "time": iso(message.created_at),
-                        "text": scan["texts"][mid],
+                        "text": words,
                         "source": self.source(group_key, message),
                     }
                 )

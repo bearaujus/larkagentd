@@ -40,7 +40,7 @@ class Config:
     # A line under each answer with the tokens the request used (TOKEN_SUMMARY, default true).
     token_summary: bool = True
     # An animated image (a Lark image key) shown in the status line while a turn runs, in place of
-    # the sand clock (LOADING_IMAGE_KEY). None keeps the sand clock.
+    # the activity card when it opens (LOADING_IMAGE_KEY).
     loading_image_key: str | None = None
     # Models a person may pick for one thread in a direct chat (/model). Empty: none.
     available_models: tuple = ()

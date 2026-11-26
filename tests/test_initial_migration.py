@@ -34,7 +34,7 @@ def configuration(store, monkeypatch):
     return config
 
 
-def test_0001_matches_the_model_in_a_fresh_database(store, configuration):
+def test_head_matches_the_model_in_a_fresh_database(store, configuration):
     command.upgrade(configuration, "head")
     command.check(configuration)
     with store.engine.connect() as conn:
@@ -43,13 +43,17 @@ def test_0001_matches_the_model_in_a_fresh_database(store, configuration):
     assert set(inspect(store.engine).get_table_names()) == set(metadata.tables) | {
         "alembic_version"
     }
+    assert "learning_mode" not in {
+        column["name"]
+        for column in inspect(store.engine).get_columns("group_knowledge_settings")
+    }
     command.downgrade(configuration, "base")
     assert set(inspect(store.engine).get_table_names()) <= {"alembic_version"}
     command.upgrade(configuration, "head")
 
 
 def test_group_setup_and_workspace_sources_have_distinct_scope(store, configuration):
-    command.upgrade(configuration, "0001")
+    command.upgrade(configuration, "head")
     config = GroupBrainConfig(enabled=True)
     access = Access(store, ("admin@example.com",), group_brain=config)
     change(access, "POST", "groups", {"group_id": "oc_demo"})

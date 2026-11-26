@@ -70,5 +70,4 @@ def learned_page(access, token, parts, query, actor, transport, verify_group_adm
         "group_name": group_name,
         "state": state.state,
         "learning": state.allows("memory"),
-        "mode": state.learning_mode,
     }

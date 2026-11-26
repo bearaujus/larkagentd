@@ -17,7 +17,6 @@ SETTINGS = {
     "enabled",
     "recall_enabled",
     "memory_enabled",
-    "learning_mode",
     "history_window_days",
     "notice_ref",
     "policy_ref",
@@ -204,7 +203,6 @@ class KnowledgeDashboard:
             "configured_enabled": bool(settings["enabled"]),
             "effective_state": state.state,
             "reason_codes": list(state.reasons),
-            "learning_mode": settings["learning_mode"],
             "capabilities": {
                 "recall": bool(settings["recall_enabled"]),
                 "memory": bool(settings["memory_enabled"]),

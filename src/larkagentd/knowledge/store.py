@@ -9,7 +9,7 @@ from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..core.store import database_time, gateway_policies
-from .models import CLEANUP_JOBS, JOB_KINDS, LEARNING_MODES, POLICY_FIELDS
+from .models import CLEANUP_JOBS, JOB_KINDS, POLICY_FIELDS
 from .tables import (
     CATALOG_TABLES,
     gb_audit_events,
@@ -30,7 +30,6 @@ SETTING_FIELDS = (
     "recall_enabled",
     "memory_enabled",
     "documents_enabled",
-    "learning_mode",
     "history_window_days",
     "notice_ref",
     "policy_ref",
@@ -43,7 +42,6 @@ DEFAULTS = dict(
     recall_enabled=True,
     memory_enabled=True,
     documents_enabled=True,
-    learning_mode="explicit",
     review_required=True,
     history_window_days=30,
     generation=0,
@@ -122,8 +120,7 @@ class KnowledgeStore:
         """Change a group's settings from a dashboard write that read `expected_version`.
 
         Raises KnowledgeError: not_registered, invalid_fields, invalid_value, version_conflict,
-        missing_group_notice (enabling without a notice and policy reference), missing_scope (passive
-        mode is not available), purging. Raises nothing for a no-op and still bumps nothing."""
+        missing_group_notice (enabling without a notice and policy reference), and purging."""
         if not self.registered(conn, group_key):
             raise KnowledgeError("not_registered", 404)
         if not isinstance(changes, dict) or set(changes) - set(SETTING_FIELDS):
@@ -138,13 +135,8 @@ class KnowledgeStore:
             raise KnowledgeError("purging", 409)
         after = {**before, **values}
         enabling = values.get("enabled") is True and not before["enabled"]
-        if after["enabled"]:
-            if not after.get("notice_ref") or not after.get("policy_ref"):
-                raise KnowledgeError("missing_group_notice", 409)
-            if after["learning_mode"] == "passive":
-                raise KnowledgeError("missing_scope", 409)
-        if values.get("learning_mode") == "passive":
-            raise KnowledgeError("missing_scope", 409)
+        if after["enabled"] and (not after["notice_ref"] or not after["policy_ref"]):
+            raise KnowledgeError("missing_group_notice", 409)
         # `state` follows `enabled`: turning it on starts serving, turning it off stops everything.
         # A paused group stays paused until it is resumed on purpose.
         if "enabled" in values:
@@ -207,9 +199,6 @@ class KnowledgeStore:
                 "documents_enabled",
             ):
                 if not isinstance(value, bool):
-                    raise KnowledgeError("invalid_value")
-            elif name == "learning_mode":
-                if value not in LEARNING_MODES:
                     raise KnowledgeError("invalid_value")
             elif name == "history_window_days":
                 if (

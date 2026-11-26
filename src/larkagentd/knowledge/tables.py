@@ -25,7 +25,7 @@ from sqlalchemy import (
 )
 
 from ..core.store import metadata
-from .models import JOB_STATES, LEARNING_MODES, STATES
+from .models import JOB_STATES, STATES
 
 
 def _in(column, values):
@@ -58,13 +58,6 @@ group_knowledge_settings = Table(
         server_default="true",
     ),
     Column(
-        "learning_mode",
-        String,
-        nullable=False,
-        default="explicit",
-        server_default="explicit",
-    ),
-    Column(
         "review_required", Boolean, nullable=False, default=True, server_default="true"
     ),
     Column(
@@ -85,7 +78,6 @@ group_knowledge_settings = Table(
     Column("notice_ref", String),
     Column("policy_ref", String),
     CheckConstraint(_in("state", STATES), name="gb_settings_state"),
-    CheckConstraint(_in("learning_mode", LEARNING_MODES), name="gb_settings_mode"),
     CheckConstraint("review_required", name="gb_settings_review_locked"),
     CheckConstraint("history_window_days BETWEEN 1 AND 365", name="gb_settings_window"),
 )

@@ -41,7 +41,6 @@ const groupKnowledgeShape = {
   configured_enabled: false,
   effective_state: "disabled",
   reason_codes: ["group_disabled"],
-  learning_mode: "explicit",
   capabilities: { recall: true, memory: true, documents: true },
   effective_capabilities: { recall: false, memory: false, documents: false },
   history_window_days: 30,

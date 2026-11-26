@@ -5,6 +5,7 @@ import signal
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -331,22 +332,30 @@ def main():
             try:
                 while not stop.wait(0.25):
                     try:
-                        job = store.claim(**select)
-                        if not job:
-                            continue
-                        done, lost = threading.Event(), threading.Event()
-                        job["lost"] = lost
-                        thread = threading.Thread(
-                            target=keep_lease,
-                            args=(service, job, done, lost),
-                            daemon=True,
+                        gate = (
+                            status.agent_work()
+                            if select.get("only") == "prepare"
+                            else nullcontext(True)
                         )
-                        thread.start()
-                        try:
-                            run_job(service, job, transport)
-                        finally:
-                            done.set()
-                            thread.join(timeout=2)
+                        with gate as admitted:
+                            if not admitted:
+                                continue
+                            job = store.claim(**select)
+                            if not job:
+                                continue
+                            done, lost = threading.Event(), threading.Event()
+                            job["lost"] = lost
+                            thread = threading.Thread(
+                                target=keep_lease,
+                                args=(service, job, done, lost),
+                                daemon=True,
+                            )
+                            thread.start()
+                            try:
+                                run_job(service, job, transport)
+                            finally:
+                                done.set()
+                                thread.join(timeout=2)
                     except Exception as exc:
                         if time.monotonic() - last_error >= 30:
                             emit(

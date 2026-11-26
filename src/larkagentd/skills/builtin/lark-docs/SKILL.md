@@ -9,5 +9,8 @@ dates and unverifiable claims. Use checklist items for actions the user asks to 
 
 Use lark_file_create with kind docx. For existing work, read the shared link and use
 lark_file_edit with append or exact text replace. Choose the smallest edit that meets the
-request and preserve surrounding text. The file must grant the group Edit or Manage for
-changes. Share the resulting URL after the tool confirms the operation.
+request and preserve surrounding text. The tool checks the bot's Edit access and the
+group's grant. When Lark hides the collaborator list, the tool can still request
+confirmation for an organization-shared Doc the bot can edit. Wait whenever the tool
+requests confirmation. Use the tool's note if a check or write fails. Share the resulting URL
+after the tool confirms the operation.

@@ -185,7 +185,6 @@ const initialKnowledge = (): GroupKnowledge => ({
   configured_enabled: false,
   effective_state: "disabled",
   reason_codes: ["group_disabled"],
-  learning_mode: "explicit",
   capabilities: { recall: true, memory: true, documents: true },
   effective_capabilities: { recall: false, memory: false, documents: false },
   history_window_days: 30,
@@ -313,7 +312,7 @@ async function mock(context: BrowserContext, state: State) {
           memory: true,
           documents: false,
         },
-        notice_ref: "Group history is searched on request.",
+        notice_ref: "The assistant can save useful facts from group turns.",
         policy_ref: "Group admission",
         version: 1,
         generation: 1,
@@ -419,11 +418,6 @@ async function mock(context: BrowserContext, state: State) {
           if (typeof body[field] === "boolean")
             knowledge.capabilities[key] = Boolean(body[field]);
         }
-        if (
-          body.learning_mode === "explicit" ||
-          body.learning_mode === "interaction"
-        )
-          knowledge.learning_mode = body.learning_mode;
         if (typeof body.history_window_days === "number")
           knowledge.history_window_days = body.history_window_days;
         knowledge.version++;
