@@ -1,0 +1,26 @@
+"""PIC-owned extension points. Implementations must not accept model-selected credentials."""
+
+from typing import Protocol
+
+
+class Agent(Protocol):
+    def build(self, request: dict) -> dict: ...
+    def send(self, body: dict, session_id: str, on_event=None) -> str: ...
+    def forget(self, session_id: str) -> bool: ...
+
+
+class Credentials(Protocol):
+    def resolve(self, owner: str, version: str) -> dict: ...
+
+
+class Tool(Protocol):
+    def execute(self, arguments: dict, owner: str, credential_version: str) -> dict: ...
+
+
+class ArtifactStore(Protocol):
+    def put(self, owner: str, session: str, content: bytes) -> str: ...
+    def get(self, owner: str, session: str, reference: str) -> bytes: ...
+
+
+class Model(Protocol):
+    def complete(self, messages: list[dict], tools: list[dict]) -> dict: ...

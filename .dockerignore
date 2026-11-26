@@ -1,0 +1,30 @@
+# Never copy secrets or local state into an image layer: a layer outlives the file's deletion.
+# `**/` makes each rule match in every folder, not only at the repository root.
+**/.env
+**/.env.*
+**/.git
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/.pytest_cache
+**/.ruff_cache
+**/.DS_Store
+build
+frontend/node_modules
+frontend/test-results
+frontend/playwright-report
+src/larkagentd/gateway/static
+dist
+
+# Hermes's state (its provider key and sessions), bind-mounted by compose.yaml: never part of a build.
+hermes_data
+
+# Not needed at run time.
+tests
+docs
+compose.yaml
+compose.postgres.yaml
+AGENTS.md
+README.md

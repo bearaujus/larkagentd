@@ -1,0 +1,48 @@
+# Hermes configuration for local development.
+# Mount this file into the Hermes container at the path its image expects (check your image docs).
+# TOOL_SERVICE_URL, TOOL_SERVICE_KEY are injected as env vars in compose.yaml.
+
+plugins:
+  enabled: [larkagentd_tools]
+platform_toolsets:
+  api_server: [larkagentd]
+
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+
+tools:
+  tool_search:
+    enabled: "off"
+
+# API toolsets exclude Hermes's built-in terminal/files. If accidentally exposed later,
+# require a sandbox rather than running commands locally. No Docker socket is mounted.
+terminal:
+  backend: docker
+
+# The model gets its skills from our tool service (see docs/architecture.md), so Hermes's own skills
+# and the background writers that call skill_manage are off.
+skills:
+  # 0 turns off the automatic background review, which may call skill_manage on its own.
+  creation_nudge_interval: 0
+  # The names of Hermes's bundled skills: the folder of each SKILL.md under hermes_data/skills.
+  # Taken from the image this repository was tested with (nousresearch/hermes-agent:latest); not
+  # checked against :stable. Names match exactly, with no wildcard, so regenerate the list for the
+  # image you run, and again after an upgrade:
+  #   find hermes_data/skills -name SKILL.md | sed 's#.*/\([^/]*\)/SKILL.md#\1#' | sort
+  disabled: [
+    apple-notes, apple-reminders, architecture-diagram, arxiv, ascii-video, baoyu-infographic,
+    blocked-page-recovery, claude-code, claude-design, codebase-inspection, codex,
+    competitor-news-monitor, computer-use, document-to-action-items, dogfood, email-inbox-triage,
+    findmy, followup-context-recovery, github, google-workspace, grounded-citations, hermes-agent,
+    himalaya, humanizer, imessage, manim-video, maps, meeting-action-items, microsoft-office,
+    obsidian, p5js, pdf, popular-web-designs, product-price-monitor, requesting-code-review,
+    sdlc-review, simplify-code, songwriting-and-ai-music, spike, systematic-debugging,
+    teams-meeting-pipeline, test-driven-development, weekly-review-planning, xurl, youtube-content
+  ]
+
+curator:
+  enabled: false
+
+model:
+  provider: custom

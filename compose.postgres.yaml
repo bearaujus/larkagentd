@@ -1,0 +1,19 @@
+# Local database: make run/migrate start it for the postgres service URL; spawn-db starts it explicitly.
+# make stop stops this project service after apps; its data volume is retained.
+name: larkagentd
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: larkagentd
+      POSTGRES_PASSWORD: larkagentd
+      POSTGRES_DB: larkagentd
+    ports: ["127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U larkagentd"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  postgres:

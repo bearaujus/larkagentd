@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>LarkAgentD</title>
+  <rect width="128" height="128" rx="29" fill="#15243c"/>
+  <path d="M36 34h56a9 9 0 0 1 9 9v35a9 9 0 0 1-9 9H62L43 101V87h-7a9 9 0 0 1-9-9V43a9 9 0 0 1 9-9Z" fill="#72dcff"/>
+  <path d="m46 68 15-15 12 12 12-12" fill="none" stroke="#15243c" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
+  <circle cx="46" cy="68" r="5" fill="#15243c"/>
+  <circle cx="85" cy="53" r="5" fill="#15243c"/>
+</svg>
