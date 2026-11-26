@@ -71,12 +71,13 @@ def admin_emails(value):
         ) from None
 
 
-def public_origin(value):
+def public_origin(value, setting="DASHBOARD_PUBLIC_URL"):
     try:
         url = urlsplit(value)
         if (
             url.scheme not in ("http", "https")
             or not url.hostname
+            or "*" in url.netloc
             or url.username is not None
             or url.password is not None
             or url.path not in ("", "/")
@@ -99,7 +100,7 @@ def public_origin(value):
         return f"{url.scheme}://{host}{suffix}"
     except ValueError:
         raise ValueError(
-            "DASHBOARD_PUBLIC_URL must be an HTTPS origin, or HTTP on loopback."
+            f"{setting} must use exact HTTPS origins, or HTTP on loopback."
         ) from None
 
 

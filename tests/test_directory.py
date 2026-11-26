@@ -75,7 +75,8 @@ def directory_http(access):
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     with httpx.Client(
-        base_url=f"http://127.0.0.1:{server.server_port}", headers={"Origin": ORIGIN}
+        base_url=f"http://127.0.0.1:{server.server_port}",
+        headers={"Origin": ORIGIN, "Host": ORIGIN.split("://", 1)[1]},
     ) as client:
         yield access, client, adapter, service
     server.shutdown()

@@ -270,6 +270,7 @@ def main():
             config.dashboard_public_url,
             directory,
             governance=service.governance,
+            additional_origins=config.dashboard_additional_origins,
         )
     ):
         def do_GET(self):
