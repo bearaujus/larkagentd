@@ -58,6 +58,13 @@ the bot's `slides:presentation:create` scope in Developer Console. Adding pages 
 `slides:presentation:update` or `slides:presentation:write_only`. Readback uses
 `slides:presentation:read`. Release the app changes for them to take effect.
 
+## Dashboard addresses
+
+Set `DASHBOARD_PUBLIC_URL` to the primary browser origin. To keep localhost and
+an HTTPS tunnel available together, add the second exact origin to
+`DASHBOARD_ADDITIONAL_ORIGINS` (comma-separated). Use origins without paths.
+HTTP is supported on loopback. The proxy should preserve the browser's Host header.
+
 ## Database baseline
 
 Revision `0001` creates the current unreleased schema. Use a fresh database

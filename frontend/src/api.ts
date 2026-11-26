@@ -85,7 +85,7 @@ export function message(error: unknown) {
     group_dashboard_scope: "This session is limited to your group knowledge.",
     invalid_source: "Check the source name and content or MCP resource URI.",
     invalid_origin:
-      "This address does not match the configured dashboard origin. Open the configured address.",
+      "This address can't make dashboard changes. Open an approved dashboard address and sign in there.",
     admin_required: "Only admins can manage managers or change group tools.",
     source_name_in_use: "A source with this name already exists.",
     source_not_found: "This source has been removed. Refresh the source list.",

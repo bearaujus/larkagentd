@@ -34,6 +34,7 @@ class Config:
     message_window: float = 1.5
     dashboard_admin_emails: tuple = ()
     dashboard_public_url: str = "http://localhost:18080"
+    dashboard_additional_origins: tuple[str, ...] = ()
     # Tokens one person may use in a UTC calendar month (input including cache, plus output);
     # 0 means unlimited.
     user_token_quota: int = 0
@@ -96,6 +97,11 @@ class Config:
             ),
             dashboard_public_url=public_origin(
                 os.getenv("DASHBOARD_PUBLIC_URL", "http://localhost:18080")
+            ),
+            dashboard_additional_origins=tuple(
+                public_origin(value.strip(), "DASHBOARD_ADDITIONAL_ORIGINS")
+                for value in os.getenv("DASHBOARD_ADDITIONAL_ORIGINS", "").split(",")
+                if value.strip()
             ),
             user_token_quota=_token_quota(),
             token_summary=_flag("TOKEN_SUMMARY", "true"),

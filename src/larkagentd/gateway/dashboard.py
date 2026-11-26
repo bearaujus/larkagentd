@@ -21,9 +21,22 @@ MAX_BODY = 64 * 1024
 
 
 def make_handler(
-    access, public_url, directory=None, *, static_root=ROOT, governance=None
+    access,
+    public_url,
+    directory=None,
+    *,
+    static_root=ROOT,
+    governance=None,
+    additional_origins=(),
 ):
-    origin = public_origin(public_url)
+    authorities = {}
+    for value in (public_url, *additional_origins):
+        origin = public_origin(value)
+        url = urlsplit(origin)
+        hosts = {url.netloc}
+        if url.port is None:
+            hosts.add(f"{url.netloc}:{443 if url.scheme == 'https' else 80}")
+        authorities[origin] = hosts
 
     def verify_group_admin(actor):
         if not actor.get("group_id"):
@@ -59,7 +72,18 @@ def make_handler(
             if self.command != "HEAD":
                 self.wfile.write(encoded)
 
-        def cookie(self, value, *, clear=False):
+        def browser_origin(self):
+            origins = self.headers.get_all("Origin", [])
+            hosts = self.headers.get_all("Host", [])
+            if (
+                len(origins) != 1
+                or len(hosts) != 1
+                or hosts[0].lower() not in authorities.get(origins[0], ())
+            ):
+                raise AccessError(403, "invalid_origin")
+            return origins[0]
+
+        def cookie(self, value, request_origin, *, clear=False):
             jar = SimpleCookie()
             jar[COOKIE] = value
             item = jar[COOKIE]
@@ -67,7 +91,7 @@ def make_handler(
             item["httponly"] = True
             item["samesite"] = "Strict"
             item["max-age"] = 0 if clear else SESSION_TTL
-            if origin.startswith("https:"):
+            if request_origin.startswith("https:"):
                 item["secure"] = True
             return item.OutputString()
 
@@ -113,8 +137,9 @@ def make_handler(
                 parts = [unquote(part) for part in path[len(PREFIX) + 1 :].split("/")]
                 if self.command not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
                     raise AccessError(405, "method_not_allowed")
-                if self.command != "GET" and self.headers.get("Origin") != origin:
-                    raise AccessError(403, "invalid_origin")
+                request_origin = (
+                    self.browser_origin() if self.command != "GET" else None
+                )
                 body = self.body()
                 if parts and parts[0] == "directory":
                     if (
@@ -181,7 +206,7 @@ def make_handler(
                                     )
                                 )
                             raise
-                    status, cookie = 200, self.cookie(session)
+                    status, cookie = 200, self.cookie(session, request_origin)
                 else:
                     token = self.session_token()
                     with access.store.engine.begin() as conn:
@@ -235,7 +260,7 @@ def make_handler(
                             status, result, cookie = (
                                 204,
                                 None,
-                                self.cookie("", clear=True),
+                                self.cookie("", request_origin, clear=True),
                             )
                         elif parts[0] == "governance" and governance is not None:
                             if self.command == "GET" and body:

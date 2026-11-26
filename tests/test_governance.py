@@ -360,7 +360,7 @@ def test_governance_http_enforces_roles_and_origin(governed):
     try:
         with httpx.Client(
             base_url=f"http://127.0.0.1:{server.server_port}",
-            headers={"Origin": ORIGIN},
+            headers={"Origin": ORIGIN, "Host": ORIGIN.split("://", 1)[1]},
         ) as client:
             assert client.get(url).status_code == 401
             assert client.get(url + "/history").status_code == 401

@@ -95,7 +95,7 @@ function AddContent({
     kind === "manager"
       ? "This person can manage group access and view/export usage. They cannot manage managers or configured admins."
       : kind === "group"
-        ? "The group starts in All users mode. Group history recall and source-backed learning on request are enabled. Workspace admins can change these in Knowledge."
+        ? "The group starts in All users mode. Conversation recall and passive learning are enabled. Workspace admins can change these in Knowledge."
         : `Membership applies only to ${scope || "this chat"}. It does not grant dashboard access or cloud/tool permissions. Saved members do not restrict All users mode.`;
   return (
     <form
