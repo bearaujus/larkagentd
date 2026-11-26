@@ -5,7 +5,7 @@ LOCAL_DATABASE ?= true
 COMPOSE ?= $(shell if docker compose version >/dev/null 2>&1; then echo 'docker compose'; else echo 'docker-compose'; fi)
 COMPOSE_PROJECT ?= larkagentd
 APP = $(COMPOSE) -p "$(COMPOSE_PROJECT)" --env-file "$(ENV_FILE)" -f compose.yaml
-DB = $(COMPOSE) -p "$(COMPOSE_PROJECT)" -f compose.postgres.yaml
+DB = $(COMPOSE) -p "$(COMPOSE_PROJECT)" $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") -f compose.postgres.yaml
 
 .PHONY: setup env build run stop status logs spawn-db stop-db migrate test lint check ui-build ui-check ui-test
 
@@ -21,6 +21,8 @@ build:
 
 spawn-db:
 	$(DB) up -d --wait postgres
+	$(DB) exec -T postgres sh -ec 'exec psql -X -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' \
+		< deploy/postgres/pgvector.sql
 
 stop-db:
 	$(DB) stop postgres

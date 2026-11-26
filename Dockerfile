@@ -23,7 +23,7 @@ COPY migrations ./migrations
 COPY scripts/configure_hermes.py ./scripts/configure_hermes.py
 COPY deploy/hermes/config.yaml ./deploy/hermes/config.yaml
 COPY --from=dashboard /build/src/larkagentd/gateway/static ./src/larkagentd/gateway/static
-RUN pip install --disable-pip-version-check --no-cache-dir '.[mcp]' \
+RUN pip install --disable-pip-version-check --no-cache-dir '.[mcp,group-brain]' \
  && useradd --uid 10001 --create-home --shell /usr/sbin/nologin app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 LOG_FORMAT=json \
     LARK_CLI_BIN=/usr/local/bin/lark-cli TOOL_SERVICE_HOST=0.0.0.0
