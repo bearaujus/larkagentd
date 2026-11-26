@@ -33,4 +33,5 @@ def load_extension() -> Extension | None:
     candidates = entry_points(group="larkagentd.extensions", name=name)
     if len(candidates) != 1:
         raise ValueError("LARKAGENTD_EXTENSION must identify one installed extension")
-    return candidates[0].load()()
+    (entry_point,) = candidates
+    return entry_point.load()()

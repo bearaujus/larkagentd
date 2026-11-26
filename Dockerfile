@@ -8,6 +8,7 @@ RUN npm run build
 
 FROM node_runtime AS lark_cli
 ARG LARK_CLI_VERSION=1.0.99
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
 RUN npm install --prefix /opt/lark-cli --omit=dev --no-audit --no-fund "@larksuite/cli@$LARK_CLI_VERSION"
 
 FROM python:3.12-slim

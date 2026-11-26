@@ -1,17 +1,30 @@
 import os
 import time
 import uuid
+from importlib.metadata import EntryPoint, EntryPoints
 
 import pytest
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import create_engine, event, insert, text
 from sqlalchemy.engine import make_url
 
-from larkagentd.core import group_actions  # noqa: F401
+from larkagentd.core import (
+    extensions,
+    group_actions,  # noqa: F401
+)
 from larkagentd.core.crypto import Vault
 from larkagentd.core.store import Store, gateway_policies, metadata
 from larkagentd.gateway.service import Service
 from larkagentd.knowledge import library  # noqa: F401
+
+
+def test_load_configured_extension(monkeypatch):
+    entry = EntryPoint(
+        name="example", value="builtins:dict", group="larkagentd.extensions"
+    )
+    monkeypatch.setattr(extensions, "entry_points", EntryPoints([entry]).select)
+    monkeypatch.setenv("LARKAGENTD_EXTENSION", "example")
+    assert extensions.load_extension() == {}
 
 
 def test_vault_owner_binding_and_tampering():
