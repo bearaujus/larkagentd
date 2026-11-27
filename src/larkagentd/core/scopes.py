@@ -6,6 +6,10 @@ the Gateway, the dashboard and the tool service share live here so they cannot d
 
 import re
 
+HUMAN_GROUP_TOOLS = frozenset(
+    ("group_memory_propose", "group_memory_correct", "group_document_propose")
+)
+
 # Always on in every group and in no scope list. The Group Brain tools are here because a group's
 # Group Brain switch, not its tool list, decides whether they answer.
 BASELINE = frozenset(

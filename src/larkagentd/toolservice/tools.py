@@ -73,6 +73,7 @@ class ToolContext:
     lark_thread_allowed: Any = frozenset()
     lark_history_refs: Any = None
     lark_history_record: Callable[..., Any] | None = None
+    observe_source: Callable[..., Any] | None = None
     # Documents found inside documents read in this turn (token to links away from the user's own),
     # how many reads this turn has spent, and how to record more.
     lark_found: Any = None
@@ -372,6 +373,8 @@ def lark_thread(ctx, arguments):
             found, message_id, text
         ),
     )
+    if observe_source := getattr(ctx, "observe_source", None):
+        options["observe_source"] = observe_source
     if scope == "thread":
         thread_id = conversation.get("thread_ref") or conversation.get("thread")
         if not conversation.get("in_thread") or not isinstance(thread_id, str):
@@ -721,9 +724,11 @@ TOOLS.update(
         work_tool(
             "search_group_knowledge",
             "Search the workspace and current group's Markdown, attached Lark Wikis and Docs, and workspace MCP "
-            "sources for a policy, guide, process or definition. Cite the returned page link and section. "
-            "For old group conversations and learned decisions also call group_knowledge_search.",
+            "sources for a policy, guide, process or definition. Set scope to workspace or group when asked "
+            "to check only one. Cite the source by title and include its page link when one is returned. "
+            "For facts learned from group messages, use group_knowledge_search with kinds set to memory.",
             ("query",),
+            ("scope",),
             kind="knowledge",
         ),
         work_tool(
@@ -731,8 +736,10 @@ TOOLS.update(
             "Inspect a Lark file from the current message, a verified requester link, "
             "or a human message returned by lark_thread or group_get_discussion in this turn. "
             "Group visibility and the bot's access are checked on each read. Use the note on failures. "
-            "For Sheets get the tab IDs when range is omitted, or pass the sheet_id and A1 range "
-            "to read a grid. For Slides get slide IDs and existing content. For Docs get its outline.",
+            "For Sheets, read tab metadata and a bounded preview for a single-tab workbook. "
+            "To read a specific grid, use the tab ID and a rectangular A1 range such as A1:B5. "
+            "Describe the range actually read. For Slides get slide IDs and existing content. "
+            "For Docs get its outline, or use lark_read for body content.",
             ("url",),
             ("sheet_id", "range"),
         ),

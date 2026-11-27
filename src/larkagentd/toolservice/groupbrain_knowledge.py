@@ -3,12 +3,11 @@
 from sqlalchemy import select
 
 from ..knowledge.catalog import Catalog
-from ..knowledge.learned import references, verify
+from ..knowledge.learned import active_revisions, check_sources, references
 from ..knowledge.memory import Memory
 from ..knowledge.recall import Recall, iso, opaque
 from ..knowledge.tables import (
     gb_discussions,
-    gb_memory,
 )
 from .groupbrain import UNTRUSTED, note_use, requester_of, scope_of
 
@@ -20,6 +19,8 @@ SCAN_ROWS = 5000
 SEARCH_DESCRIPTION = (
     "Search this group's learned facts and earlier Lark discussions for a decision, process, or "
     "previous conversation. Search only the originating group. Optionally select memory or discussion. "
+    "A saved fact and an earlier discussion are different evidence. When asked what is saved, "
+    "select memory. Use the memory_id from a saved fact if the requester explicitly asks to correct it. "
     "Date and participant filters apply to discussions. Cite the verified source URL when supplied, "
     "and use the excerpt and time if Lark does not provide a link. For workspace and group Markdown "
     "use search_group_knowledge."
@@ -75,16 +76,25 @@ def memory_evidence_id(memory_id):
 
 def _memory_items(runtime, group_key, query, limit):
     with runtime.connection() as conn:
-        found = Memory(runtime).search(runtime, conn, group_key, query, limit)
+        found = Memory(runtime).search(
+            runtime, conn, group_key, query, limit, verify_pool=True
+        )
         items = found.get("results", [])
         refs = [
             references(conn, group_key, item["memory_id"], item["revision"])
             for item in items
         ]
-    verified = verify(runtime, group_key, refs)
-    return [
+    checks = check_sources(runtime.source, group_key, refs)
+    available = _current_memory_evidence(
+        runtime,
+        group_key,
+        [(item["memory_id"], item["revision"], ref) for item, ref in zip(items, refs)],
+        checks,
+    )
+    results = [
         {
             "evidence_id": memory_evidence_id(item["memory_id"]),
+            "memory_id": item["memory_id"],
             "kind": "memory",
             "category": item["category"],
             "text": item["content"],
@@ -92,19 +102,49 @@ def _memory_items(runtime, group_key, query, limit):
             if item.get("approved_at")
             else None,
             "revision": item["revision"],
-            "sources": sources,
+            "sources": available[item["memory_id"]],
         }
-        for item, sources in zip(items, verified)
-        if sources
+        for item in items
+        if item["memory_id"] in available
     ]
+    return results[:limit], any(
+        c["status"] == "temporarily_unavailable" for c in checks
+    )
 
 
-def _discussion_items(runtime, group_key, requester, arguments, limit):
+def _current_memory_evidence(runtime, group_key, candidates, checks):
+    verified = [
+        (mid, revision, refs, check["sources"])
+        for (mid, revision, refs), check in zip(candidates, checks)
+        if check["status"] == "verified"
+    ]
+    if not verified:
+        return {}
+    with runtime.connection() as conn:
+        current = {
+            mid: revision
+            for mid, revision in conn.execute(
+                active_revisions(group_key, [mid for mid, *_ in verified])
+            )
+        }
+        return {
+            mid: sources
+            for mid, revision, refs, sources in verified
+            if current.get(mid) == revision
+            and references(conn, group_key, mid, revision) == refs
+        }
+
+
+def _discussion_items(
+    runtime, group_key, requester, arguments, limit, observe_source=None
+):
     request = {"query": arguments["query"], "limit": limit}
     for key in ("date_from", "date_to", "participant"):
         if key in arguments:
             request[key] = arguments[key]
-    found = Recall(runtime).search_discussions(group_key, requester, request)
+    found = Recall(runtime, observe_source).search_discussions(
+        group_key, requester, request
+    )
     if found.get("status") not in ("ok", "partial"):
         return [], found.get("status"), None
     items = [
@@ -168,6 +208,7 @@ def group_knowledge_search(ctx, arguments):
     query, kinds, limit = valid
     state = runtime.effective(group_key)
     generation = state.generation
+    observe_source = getattr(ctx, "observe_source", None)
     per_kind, unavailable, partial, coverage = {}, [], False, None
     serving = [kind for kind in kinds if state.allows(CAPABILITY[kind])]
     if not serving:
@@ -178,10 +219,19 @@ def group_knowledge_search(ctx, arguments):
     for kind in serving:
         try:
             if kind == "memory":
-                per_kind[kind] = _memory_items(runtime, group_key, query, limit)
+                per_kind[kind], source_unavailable = _memory_items(
+                    runtime, group_key, query, limit
+                )
+                if source_unavailable:
+                    unavailable.append({"kind": kind, "reason": "source_unavailable"})
             else:
                 items, status, coverage = _discussion_items(
-                    runtime, group_key, requester_of(ctx), arguments, limit
+                    runtime,
+                    group_key,
+                    requester_of(ctx),
+                    arguments,
+                    limit,
+                    observe_source,
                 )
                 if status not in ("ok", "partial"):
                     unavailable.append({"kind": kind, "reason": status})
@@ -203,6 +253,13 @@ def group_knowledge_search(ctx, arguments):
     }
     if coverage is not None:
         result["discussion_coverage"] = coverage
+    if observe_source:
+        for item in result["results"]:
+            if item["kind"] == "memory":
+                for source in item["sources"]:
+                    observe_source(
+                        source["url"], source["source_id"], source["excerpt"]
+                    )
     if ctx.job_note:
         cached = (ctx.conversation or {}).get("gb_discussion_evidence") or {}
         current = {
@@ -223,24 +280,19 @@ def group_knowledge_search(ctx, arguments):
 
 def _memory_sources(runtime, group_key, wanted):
     with runtime.connection() as conn:
-        rows = conn.execute(
-            select(gb_memory.c.id, gb_memory.c.current_revision)
-            .where(
-                gb_memory.c.group_key == group_key,
-                gb_memory.c.state == "active",
-            )
-            .limit(SCAN_ROWS)
-        ).all()
+        rows = conn.execute(active_revisions(group_key).limit(SCAN_ROWS)).all()
         matching = [
             (
-                memory_evidence_id(row.id),
+                row.id,
+                row.current_revision,
                 references(conn, group_key, row.id, row.current_revision),
             )
             for row in rows
             if memory_evidence_id(row.id) in wanted
         ]
-    verified = verify(runtime, group_key, [refs for _, refs in matching])
-    return {key: refs for (key, _), refs in zip(matching, verified) if refs}
+    checks = check_sources(runtime.source, group_key, [refs for _, _, refs in matching])
+    available = _current_memory_evidence(runtime, group_key, matching, checks)
+    return {memory_evidence_id(mid): sources for mid, sources in available.items()}
 
 
 def _discussion_sources(conn, group_key, wanted):
@@ -308,7 +360,7 @@ def group_knowledge_sources(ctx, arguments):
         valid.update(_memory_sources(runtime, group_key, wanted))
     if state.allows("recall"):
         cached = (ctx.conversation or {}).get("gb_discussion_evidence") or {}
-        recall = Recall(runtime)
+        recall = Recall(runtime, getattr(ctx, "observe_source", None))
         for identifier in ids:
             if discussion := cached.get(identifier):
                 found = recall.get_discussion(

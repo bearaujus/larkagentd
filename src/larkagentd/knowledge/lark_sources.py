@@ -24,6 +24,7 @@ class SourceMessage:
     msg_type: str
     edited: bool
     link: str | None
+    sender_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,7 @@ class CliGroupSource:
                     str(kind),
                     bool(item.get("updated") or item.get("edited")),
                     link,
+                    sender_name=sender.get("name"),
                 )
             )
         self.skipped += skipped

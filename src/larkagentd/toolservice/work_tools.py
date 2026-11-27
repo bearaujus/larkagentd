@@ -90,7 +90,10 @@ def search_group_knowledge(ctx, args):
     scope = group_chat_scope(ctx.chat_id)
     config = ctx.group_brain.config if ctx.group_brain else None
     try:
-        result = ctx.source_library.search(scope, args["query"], config, ctx=ctx)
+        options = {"source_scope": args["scope"]} if "scope" in args else {}
+        result = ctx.source_library.search(
+            scope, args["query"], config, ctx=ctx, **options
+        )
     except KnowledgeError as exc:
         raise LarkError(exc.code) from None
     generation = result.pop("_generation", None)

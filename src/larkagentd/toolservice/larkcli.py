@@ -178,6 +178,14 @@ def _column_number(col):
     return result
 
 
+def _column_label(number):
+    label = ""
+    while number:
+        number, rest = divmod(number - 1, 26)
+        label = chr(ord("A") + rest) + label
+    return label
+
+
 def _range(value):
     if not isinstance(value, str):
         raise LarkError("bad_range")
@@ -513,6 +521,7 @@ def _transcript(
     chat_id=None,
     show_names=False,
     observe_files=None,
+    observe_source=None,
 ):
     raw = data.get("messages", []) if isinstance(data, dict) else []
     if not isinstance(raw, list):
@@ -620,10 +629,20 @@ def _transcript(
         result["truncated"] = True
     if len(json.dumps(result, ensure_ascii=True)) > RESULT_CHARS:
         result["next_page_token"] = None
-    if observe_files is not None:
+    if observe_files is not None or observe_source is not None:
         for row, message_id in zip(result["messages"], origins):
-            if message_id:
+            if not message_id:
+                continue
+            if observe_files is not None:
                 observe_files(message_id, row["text"])
+            if observe_source is not None and row["url"]:
+                observe_source(
+                    row["url"],
+                    message_id,
+                    row["text"],
+                    None,
+                    row["time"] + " UTC" if row["time"] else None,
+                )
     return result
 
 
@@ -737,6 +756,7 @@ class LarkReader:
         chat_id=None,
         show_names=False,
         observe_files=None,
+        observe_source=None,
     ):
         data = self.raw_thread_messages(thread_id, page_token, limit, order=order)
         return _transcript(
@@ -747,6 +767,7 @@ class LarkReader:
             chat_id=chat_id,
             show_names=show_names,
             observe_files=observe_files,
+            observe_source=observe_source,
         )
 
     def chat(
@@ -759,6 +780,7 @@ class LarkReader:
         order="desc",
         show_names=False,
         observe_files=None,
+        observe_source=None,
     ):
         data = self.raw_chat_messages(chat_id, page_token, limit, order=order)
         return _transcript(
@@ -769,6 +791,7 @@ class LarkReader:
             chat_id=chat_id,
             show_names=show_names,
             observe_files=observe_files,
+            observe_source=observe_source,
         )
 
     def _read_doc(self, url):
@@ -931,32 +954,95 @@ class LarkReader:
             with open(path, "rb") as stream:
                 return stream.read(limit + 1)[:limit]
 
-    def sheet(self, url, range=None):
+    def sheet(self, url, range=None, *, workbook=None, tab=None):
         kind, token, extra = parse_link(url)
         if kind != "sheet":
             raise LarkError("bad_link")
         sheet_id, cli_range = _range(range) if range is not None else (None, None)
-        workbook = self._call(
-            ("sheets", "+workbook-info"), ["--spreadsheet-token", token]
-        )
+        if tab is not None:
+            if not isinstance(tab, str) or not tab.strip() or len(tab) > 128:
+                raise LarkError("bad_range")
+            if sheet_id is not None and sheet_id != tab:
+                raise LarkError("bad_range")
+            sheet_id = tab
+        if workbook is None:
+            workbook = self._call(
+                ("sheets", "+workbook-info"), ["--spreadsheet-token", token]
+            )
         sheets = workbook.get("sheets", []) if isinstance(workbook, dict) else []
         if not sheet_id:
             sheet_id = extra.get("sheet") or (
                 sheets[0].get("sheet_id") if sheets else None
             )
+        selected = next(
+            (sheet for sheet in sheets if sheet.get("sheet_id") == sheet_id), {}
+        )
+        if not selected:
+            selected = next(
+                (sheet for sheet in sheets if sheet.get("sheet_name") == sheet_id), {}
+            )
+        sheet_id = selected.get("sheet_id")
         if not isinstance(sheet_id, str) or not SHEET_ID.fullmatch(sheet_id):
-            raise LarkError("bad_link")
+            raise LarkError("sheet_tab_not_found")
+        metadata = {"sheet_name": selected.get("sheet_name"), "sheet_id": sheet_id}
+        if cli_range is None:
+            row_count = selected.get("row_count")
+            col_count = selected.get("column_count")
+            rows = (
+                min(MAX_ROWS, row_count)
+                if type(row_count) is int and row_count > 0
+                else MAX_ROWS
+            )
+            cols = (
+                min(MAX_COLUMNS, col_count)
+                if type(col_count) is int and col_count > 0
+                else MAX_COLUMNS
+            )
+            preview = f"A1:{_column_label(cols)}{rows}"
+            return self._sheet_values(token, preview, metadata, preview=True)
         args = [
             "--spreadsheet-token",
             token,
             "--sheet-id",
             sheet_id,
             "--range",
-            cli_range or "A1:AD100",
+            cli_range,
         ]
         data = self._call(("sheets", "+cells-get"), args)
+        result = _fit_result(
+            {
+                **metadata,
+                "range": cli_range,
+                "rows": data.get("ranges", data) if isinstance(data, dict) else data,
+            }
+        )
+        if result.get("truncated") and not result.get("rows"):
+            return self._sheet_values(token, cli_range, metadata)
+        return result
+
+    def _sheet_values(self, token, cell_range, metadata, *, preview=False):
+        sheet_id = metadata["sheet_id"]
+        data = self._invoke(
+            (
+                "api",
+                "GET",
+                f"/open-apis/sheets/v2/spreadsheets/{token}/values/{sheet_id}!{cell_range}",
+            ),
+            (),
+        )
+        values = data.get("valueRange") if isinstance(data, dict) else None
+        if not isinstance(values, dict) or not isinstance(
+            values.get("values", []), list
+        ):
+            raise LarkError("lark_unavailable")
         return _fit_result(
-            {"rows": data.get("ranges", data) if isinstance(data, dict) else data}
+            {
+                **metadata,
+                "rows": values.get("values", []),
+                "range": cell_range,
+                "preview": preview,
+                "note": "Only this range was read.",
+            }
         )
 
     def base(self, url, table=None, page_token=None):

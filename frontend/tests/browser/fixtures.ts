@@ -775,7 +775,17 @@ async function mock(context: BrowserContext, state: State) {
                     ? null
                     : i === 1
                       ? "0"
-                      : (i * 0.028).toFixed(6),
+                      : url.searchParams.has("all_time")
+                        ? (i * 0.028).toFixed(6)
+                        : [
+                            "1.48",
+                            "7.80",
+                            "2.07",
+                            "1.98",
+                            "0.95",
+                            "5.29",
+                            "2.03915171",
+                          ][i - 2],
             priced_sessions: i === 0 ? 0 : 1,
             total_tokens: [
               16000, 23500, 19000, 37000, 31000, 43000, 38000, 56000, 49000,

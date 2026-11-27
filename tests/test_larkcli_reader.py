@@ -159,16 +159,70 @@ def test_bad_ranges_rejected_before_any_subprocess_call(tmp_path, value):
     assert not fake.calls
 
 
+def test_sheet_tab_title_uses_the_provider_id(tmp_path):
+    info = {
+        "ok": True,
+        "data": {"sheets": [{"sheet_id": "sheet1234", "sheet_name": "Sheet1"}]},
+    }
+    cells = {"ok": True, "data": {"ranges": [{"cells": [[9, 12]]}]}}
+    service, fake, _ = reader(tmp_path, [info, cells])
+    result = service.sheet(SHEET, "Sheet1!A1:B3")
+    argv = fake.calls[1][0]
+    assert argv[argv.index("--sheet-id") + 1] == "sheet1234"
+    assert result["sheet_name"] == "Sheet1" and result["range"] == "A1:B3"
+
+
+def test_sheet_missing_tab_is_distinct_from_missing_workbook(tmp_path):
+    info = {
+        "ok": True,
+        "data": {"sheets": [{"sheet_id": "sheet1234", "sheet_name": "Sheet1"}]},
+    }
+    service, fake, _ = reader(tmp_path, [info])
+    with pytest.raises(LarkError, match="^sheet_tab_not_found$"):
+        service.sheet(SHEET, "Missing!A1:B3")
+    assert len(fake.calls) == 1
+
+
+def test_sheet_range_uses_compact_values_if_formatted_read_drops_the_rows(tmp_path):
+    info = {
+        "ok": True,
+        "data": {"sheets": [{"sheet_id": "sheet1234", "sheet_name": "Sheet1"}]},
+    }
+    oversized = {"ok": True, "data": {"ranges": [{"cells": [["x" * 100_000]]}]}}
+    values = {"ok": True, "data": {"valueRange": {"values": [["Blue tags", 9]]}}}
+    service, fake, _ = reader(tmp_path, [info, oversized, values])
+    result = service.sheet(SHEET, "Sheet1!A1:T100")
+    assert result["rows"] == [["Blue tags", 9]] and result["range"] == "A1:T100"
+    assert fake.calls[-1][0][3].endswith("/values/sheet1234!A1:T100")
+
+
 def test_sheet_falls_back_to_first_workbook_sheet(tmp_path):
     service, fake, _ = reader(
         tmp_path,
         [
-            {"ok": True, "data": {"sheets": [{"sheet_id": "sheet1234"}]}},
-            {"ok": True, "data": {"ranges": []}},
+            {
+                "ok": True,
+                "data": {
+                    "sheets": [
+                        {
+                            "sheet_id": "sheet1234",
+                            "sheet_name": "Inventory",
+                            "row_count": 20,
+                            "column_count": 4,
+                        }
+                    ]
+                },
+            },
+            {"ok": True, "data": {"valueRange": {"values": [["Blue tags", 9]]}}},
         ],
     )
-    service.sheet(SHEET)
-    assert fake.calls[1][0][fake.calls[1][0].index("--range") + 1] == "A1:AD100"
+    value = service.sheet(SHEET)
+    assert value["rows"] == [["Blue tags", 9]]
+    assert value["sheet_name"] == "Inventory"
+    assert value["range"] == "A1:D20" and value["preview"]
+    command = fake.calls[1][0]
+    assert command[1:3] == ["api", "GET"]
+    assert command[3].endswith("/values/sheet1234!A1:D20")
 
 
 def test_base_reads_table_fields_and_page_of_records(tmp_path):
@@ -220,7 +274,7 @@ def test_every_call_is_fixed_allowlisted_read_command_with_no_write_switches(tmp
         [
             {"ok": True, "data": {"document": {"content": "read"}}},
             {"ok": True, "data": {"sheets": [{"sheet_id": "sheet1234"}]}},
-            {"ok": True, "data": {"ranges": []}},
+            {"ok": True, "data": {"valueRange": {"values": []}}},
             {"ok": True, "data": {"tables": []}},
         ],
     )
@@ -229,8 +283,14 @@ def test_every_call_is_fixed_allowlisted_read_command_with_no_write_switches(tmp
     service.base(BASE)
     for argv, options in fake.calls:
         command = tuple(argv[1:3])
-        assert command in larkcli.READ_COMMANDS
-        assert "api" not in argv and "--yes" not in argv
+        if command == ("api", "GET"):
+            assert (
+                argv[3]
+                == "/open-apis/sheets/v2/spreadsheets/shtABCDEFGH/values/sheet1234!A1:AD100"
+            )
+        else:
+            assert command in larkcli.READ_COMMANDS
+        assert "--yes" not in argv
         assert not ("--as" in argv and argv[argv.index("--as") + 1] == "user")
         assert not any(token in WRITE_VERBS for token in argv[1:])
         assert options["shell"] is False and isinstance(argv, list)

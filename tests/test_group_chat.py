@@ -1,5 +1,6 @@
 import itertools
 
+import pytest
 from test_agent import FakeAgent
 from test_card_lifecycle import Transport, drain
 from test_core import setup
@@ -66,16 +67,19 @@ def test_passive_learning_saves_grounded_fact_with_successful_turn(store):
     from larkagentd.knowledge.models import GroupBrainConfig
     from larkagentd.knowledge.runtime import GroupBrainRuntime
     from larkagentd.knowledge.store import KnowledgeStore
-    from larkagentd.knowledge.tables import gb_memory
+    from larkagentd.knowledge.tables import gb_memory, gb_memory_revisions
     from larkagentd.toolservice.registry import ToolRegistry
     from larkagentd.toolservice.tools import TOOLS
     from larkagentd.toolservice.toolservice import ToolService
 
     svc, agent, transport = room(store)
-    config = GroupBrainConfig(enabled=True)
+    config = GroupBrainConfig(enabled=True, memory_review_days=14)
     scope = "group:grp"
     knowledge = KnowledgeStore()
     fact = "All release checklists require restoring a backup in staging."
+    source_url = (
+        f"https://applink.larksuite.com/client/chat/open?openChatId={GROUP}&position=42"
+    )
 
     class LiveSource:
         text = fact
@@ -86,6 +90,7 @@ def test_passive_learning_saves_grounded_fact_with_successful_turn(store):
                 replace(
                     message(ids[0], chat_id=GROUP, sender_id="u", text=self.text),
                     created_at=datetime.now(timezone.utc),
+                    link=source_url,
                 )
             ]
 
@@ -117,21 +122,26 @@ def test_passive_learning_saves_grounded_fact_with_successful_turn(store):
             return conn.scalar(select(func.count()).select_from(gb_memory))
 
     def propose(session_id):
-        status, response = tools.handle(
-            "Bearer test-key",
-            "group_memory_propose",
-            json.dumps(
-                {
-                    "session_id": session_id,
-                    "arguments": {
-                        "category": "procedure",
-                        "content": fact,
-                        "evidence": fact,
-                    },
-                }
-            ),
-        )
+        def nominate(text):
+            return tools.handle(
+                "Bearer test-key",
+                "group_memory_propose",
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "arguments": {
+                            "category": "procedure",
+                            "content": text,
+                            "evidence": fact,
+                        },
+                    }
+                ),
+            )
+
+        status, response = nominate(fact)
         assert status == 200 and response["result"]["status"] == "queued"
+        _, second = nominate("An unrelated fact must not overwrite the candidate.")
+        assert second["result"]["status"] == "not_staged"
         assert count_facts() == 0
 
     # A stale excerpt still allows delivery of the normal answer.
@@ -143,7 +153,7 @@ def test_passive_learning_saves_grounded_fact_with_successful_turn(store):
     assert "answer" in texts(transport, GROUP)
 
     source.text = fact
-    ask(svc, "u", fact)
+    ask(svc, "u", fact, message_id="om_memory_fixture")
     drain(svc, transport)
     assert agent.requests[-1]["passive_learning"] is True
     assert count_facts() == 1
@@ -152,6 +162,10 @@ def test_passive_learning_saves_grounded_fact_with_successful_turn(store):
             scope,
             "active",
         )
+        saved_at, expires_at = conn.execute(
+            select(gb_memory_revisions.c.approved_at, gb_memory_revisions.c.expires_at)
+        ).one()
+        assert (expires_at - saved_at).days == 14
 
     def recall(session_id):
         status, response = tools.handle(
@@ -170,8 +184,67 @@ def test_passive_learning_saves_grounded_fact_with_successful_turn(store):
         assert items[0]["sources"][0]["verified"] is True
 
     agent.hook = recall
-    ask(svc, "u", "What goes on our release checklist?")
+    agent.reply = f"[Original Lark message]({source_url})"
+    ask(
+        svc,
+        "u",
+        "Could you forward the original Lark message about our release checklist?",
+    )
     drain(svc, transport)
+    assert count_facts() == 1
+    answer = transport.sent[-1]
+    assert answer["source_message_id"] == "om_memory_fixture"
+    fallback = json.loads(answer["preview_card"])
+    assert any(
+        node.get("text", {}).get("content") == fact
+        for node in fallback["body"]["elements"]
+    )
+    agent.reply = f"The checklist includes a staging restore.\n\nThe original message: {source_url}"
+    ask(svc, "u", "What should the release checklist cover?")
+    drain(svc, transport)
+    answer = transport.sent[-1]
+    assert answer["source_message_id"] is None
+    assert fact in answer["text"]
+    elements = json.loads(answer["preview_card"])["body"]["elements"]
+    assert elements[0]["content"] == "The checklist includes a staging restore."
+    assert any(node.get("text", {}).get("content") == fact for node in elements)
+    assert source_url not in answer["preview_card"] and source_url not in answer["text"]
+    agent.reply = "[Original Lark message](https://applink.larksuite.com/client/chat/open?openChatId=oc_elsewhere&position=2)"
+    ask(svc, "u", "Could you link the original procedure?")
+    drain(svc, transport)
+    assert transport.sent[-1]["source_message_id"] is None
+    assert transport.sent[-1]["text"] == "I couldn’t verify the original Lark message."
+
+    svc.lark_app_senders = frozenset({"cli_fixture"})
+
+    def app_recall(session_id):
+        recall(session_id)
+        for name, arguments in (
+            (
+                "group_memory_propose",
+                {"category": "procedure", "content": fact, "evidence": fact},
+            ),
+            (
+                "group_memory_correct",
+                {
+                    "memory_id": "example",
+                    "replacement": fact,
+                    "reason": "New procedure",
+                    "evidence": fact,
+                },
+            ),
+        ):
+            status, result = tools.handle(
+                "Bearer test-key",
+                name,
+                json.dumps({"session_id": session_id, "arguments": arguments}),
+            )
+            assert status == 200 and result["error"] == "app_read_only"
+
+    agent.hook = app_recall
+    ask(svc, "cli_fixture", "What do our release checklists include?")
+    drain(svc, transport)
+    assert not agent.requests[-1].get("passive_learning")
     assert count_facts() == 1
 
 
@@ -348,6 +421,24 @@ def test_allowlisted_app_gets_a_group_reply_under_its_own_principal(store):
     assert answer["reply_to"] == message
     assert len(agent.calls) == 1
     assert not owner_state(store, "t:cli_fixture").get("credential_version")
+
+
+@pytest.mark.parametrize("tool", ("lark_file_create", "lark_file_edit"))
+def test_app_file_refusal_uses_the_actual_outcome(store, tool):
+    from larkagentd.lark.ui_text import APP_FILE_REFUSALS
+
+    svc, agent, transport = room(store, "Ask again and the action should go through.")
+    svc.lark_app_senders = frozenset({"cli_fixture"})
+    agent.events = [
+        ("started", "read_skill", {"call": "guide"}),
+        ("completed", "read_skill", {"call": "guide"}),
+        ("started", tool, {"call": "file"}),
+        ("completed", tool, {"call": "file", "error": True}),
+    ]
+    ask(svc, "cli_fixture", "Please make the requested file change.")
+    drain(svc, transport)
+    (answer,) = transport.sent
+    assert answer["text"] == APP_FILE_REFUSALS[tool]
 
 
 def test_revoking_an_app_discards_its_queued_turn(store):

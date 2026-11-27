@@ -238,7 +238,7 @@
   },
   {
     "name": "group_knowledge_search",
-    "description": "Search this group's learned facts and earlier Lark discussions for a decision, process, or previous conversation. Search only the originating group. Optionally select memory or discussion. Date and participant filters apply to discussions. Cite the verified source URL when supplied, and use the excerpt and time if Lark does not provide a link. For workspace and group Markdown use search_group_knowledge.",
+    "description": "Search this group's learned facts and earlier Lark discussions for a decision, process, or previous conversation. Search only the originating group. Optionally select memory or discussion. A saved fact and an earlier discussion are different evidence. When asked what is saved, select memory. Use the memory_id from a saved fact if the requester explicitly asks to correct it. Date and participant filters apply to discussions. Cite the verified source URL when supplied, and use the excerpt and time if Lark does not provide a link. For workspace and group Markdown use search_group_knowledge.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -349,7 +349,7 @@
   },
   {
     "name": "group_memory_correct",
-    "description": "Propose a correction to an existing group memory. This creates a new pending revision and does not edit or publish the existing fact. Nothing is shared until a group administrator reviews and approves it. Do not include secrets, credentials, personal data, or private tool output. Never claim it was published.",
+    "description": "When a person explicitly asks to correct a saved group fact, use its memory_id from group_knowledge_search and a verbatim excerpt from a human group message supporting the replacement. Omit source_ids for the current message. Otherwise use the exact source IDs returned by group search. This queues a correction for a workspace administrator; the existing fact stays active until approval. Skip secrets, personal data, and private tool output.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -368,6 +368,11 @@
           "minLength": 1,
           "maxLength": 1000
         },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
         "source_ids": {
           "type": "array",
           "items": {
@@ -379,7 +384,8 @@
       "required": [
         "memory_id",
         "replacement",
-        "reason"
+        "reason",
+        "evidence"
       ],
       "additionalProperties": false
     }
@@ -421,11 +427,14 @@
   },
   {
     "name": "search_group_knowledge",
-    "description": "Search the workspace and current group's Markdown, attached Lark Wikis and Docs, and workspace MCP sources for a policy, guide, process or definition. Cite the returned page link and section. For old group conversations and learned decisions also call group_knowledge_search.",
+    "description": "Search the workspace and current group's Markdown, attached Lark Wikis and Docs, and workspace MCP sources for a policy, guide, process or definition. Set scope to workspace or group when asked to check only one. Cite the source by title and include its page link when one is returned. For facts learned from group messages, use group_knowledge_search with kinds set to memory.",
     "parameters": {
       "type": "object",
       "properties": {
         "query": {
+          "type": "string"
+        },
+        "scope": {
           "type": "string"
         }
       },
@@ -437,7 +446,7 @@
   },
   {
     "name": "lark_file_read",
-    "description": "Inspect a Lark file from the current message, a verified requester link, or a human message returned by lark_thread or group_get_discussion in this turn. Group visibility and the bot's access are checked on each read. Use the note on failures. For Sheets get the tab IDs when range is omitted, or pass the sheet_id and A1 range to read a grid. For Slides get slide IDs and existing content. For Docs get its outline.",
+    "description": "Inspect a Lark file from the current message, a verified requester link, or a human message returned by lark_thread or group_get_discussion in this turn. Group visibility and the bot's access are checked on each read. Use the note on failures. For Sheets, read tab metadata and a bounded preview for a single-tab workbook. To read a specific grid, use the tab ID and a rectangular A1 range such as A1:B5. Describe the range actually read. For Slides get slide IDs and existing content. For Docs get its outline, or use lark_read for body content.",
     "parameters": {
       "type": "object",
       "properties": {

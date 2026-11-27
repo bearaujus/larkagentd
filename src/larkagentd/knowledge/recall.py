@@ -111,8 +111,9 @@ def refusal(status, reason=None):
 class Recall:
     """Live recall for the group of one verified turn."""
 
-    def __init__(self, runtime):
+    def __init__(self, runtime, observe_source=None):
         self.runtime = runtime
+        self.observe_source = observe_source
 
     # --- gate ---
 
@@ -467,16 +468,24 @@ class Recall:
             "revision": 1,
         }
 
-    @staticmethod
-    def source(group_key, message):
+    def source(self, group_key, message):
         """A source reference. The link is the verified official one the source returned, or none:
         a synthetic id is never turned into a URL."""
         link = message.link
+        if self.observe_source and message.sender_type == "user":
+            self.observe_source(
+                link,
+                message.message_id,
+                message.text,
+                message.sender_name,
+                message.created_at.strftime("%Y-%m-%d %H:%M UTC"),
+            )
         return {
             "source_id": opaque("src", group_key, message.message_id),
             "link_type": "message" if link else "none",
             "url": link,
             "timestamp": iso(message.created_at),
+            "excerpt": snippet(sanitize(message.text, max_chars=240).text or "", 240),
             "verified": True,
         }
 

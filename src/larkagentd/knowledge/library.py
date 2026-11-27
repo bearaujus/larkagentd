@@ -320,11 +320,13 @@ class SourceLibrary:
             if isinstance(value, str)
         }
 
-    def search(self, scope, query, config, ctx=None):
+    def search(self, scope, query, config, ctx=None, *, source_scope=None):
         import asyncio
 
         if not isinstance(query, str) or not 0 < len(query.strip()) <= 1000:
             raise KnowledgeError("invalid_query")
+        if source_scope not in (None, "workspace", "group"):
+            raise KnowledgeError("invalid_source_scope")
         from .policy import effective
         from .policy import store as policy_store
 
@@ -332,7 +334,14 @@ class SourceLibrary:
             if not policy_store.registered(conn, scope):
                 return {"results": [], "status": "not_authorized"}
             state = effective(conn, config, scope) if config else None
-            scopes = [GLOBAL, scope] if state and state.serving else [GLOBAL]
+            if source_scope == "group":
+                if not state or not state.serving:
+                    return {"results": [], "status": "disabled"}
+                scopes = [scope]
+            else:
+                scopes = [GLOBAL]
+                if source_scope is None and state and state.serving:
+                    scopes.append(scope)
             rows = (
                 conn.execute(
                     select(sources)

@@ -149,9 +149,9 @@ def test_library_combines_own_group_and_workspace_with_mcp_sources(store):
     async def read(entry, _uri):
         return "Pilot communications policy." if "url" in entry else "Pilot calendar."
 
-    found = SourceLibrary(store, connectors, read=read).search(
-        f"group:{CHAT}", "pilot", GroupBrainConfig(enabled=True)
-    )
+    library = SourceLibrary(store, connectors, read=read)
+    config = GroupBrainConfig(enabled=True)
+    found = library.search(f"group:{CHAT}", "pilot", config)
     assert {item["source"] for item in found["results"]} == {
         "Brief",
         "Policy",
@@ -159,6 +159,17 @@ def test_library_combines_own_group_and_workspace_with_mcp_sources(store):
         "Calendar MCP",
     }
     assert "30 volunteers" in str(found) and "95 volunteers" not in str(found)
+    shared = library.search(f"group:{CHAT}", "pilot", config, source_scope="workspace")
+    assert {item["scope"] for item in shared["results"]} == {"workspace"}
+    assert "volunteers" not in str(shared)
+    own = library.search(f"group:{CHAT}", "pilot", config, source_scope="group")
+    other = library.search("group:oc_other", "pilot", config, source_scope="group")
+    assert [item["text"] for item in own["results"]] == [
+        "The pilot uses 30 volunteers."
+    ]
+    assert [item["text"] for item in other["results"]] == [
+        "The pilot uses 95 volunteers."
+    ]
 
 
 def test_group_file_check_requires_group_edit_even_with_bot_edit():
@@ -246,6 +257,7 @@ def test_org_link_permission_when_lark_withholds_collaborators(
         ("hidden", True, None, None, True),
         ("hidden", True, None, "remove_org_view", False),
         ("hidden", True, None, "lark_refuses_write", False),
+        ("edit", False, None, "no_change", False),
     ],
 )
 def test_thread_edit_checks_access_and_requires_confirm(
@@ -262,6 +274,8 @@ def test_thread_edit_checks_access_and_requires_confirm(
         permission = "view"
         organization_link = org_visible
         refuse_write = False
+        no_change = False
+        content = "The rollout starts Monday."
 
         def _invoke(self, command, _args):
             if command[0] == "drive":
@@ -280,6 +294,10 @@ def test_thread_edit_checks_access_and_requires_confirm(
                 updates.append(command)
                 if self.refuse_write:
                     raise LarkError("forbidden", provider_code=1063002)
+                if not self.no_change:
+                    self.content += "\nchange"
+            if command[-1].endswith("/raw_content"):
+                return {"content": self.content}
             if command[-1].endswith("/public"):
                 return {
                     "permission_public": {
@@ -387,6 +405,8 @@ def test_thread_edit_checks_access_and_requires_confirm(
         reader.organization_link = False
     elif after_confirm == "lark_refuses_write":
         reader.refuse_write = True
+    elif after_confirm == "no_change":
+        reader.no_change = True
     model.hook = lambda sid: outcomes.extend(
         call(sid, "run_confirmed_action", {}) for _ in range(2)
     )
@@ -406,6 +426,9 @@ def test_thread_edit_checks_access_and_requires_confirm(
             and record.fields.get("stage") == "write_request"
         ]
         assert record.fields["provider_code"] == 1063002
+        assert updates == [("docs", "+update")]
+    elif after_confirm == "no_change":
+        assert outcomes[1]["error"] == "write_no_change"
         assert updates == [("docs", "+update")]
     else:
         assert outcomes[1]["result"]["verified"]
@@ -677,6 +700,7 @@ def test_learned_fact_stops_serving_when_its_original_message_changes(store):
 
     assert shown()["sources"][0]["excerpt"] == message.text
     assert shown()["activation"] == "source_checked"
+    assert shown()["saved_at"] < shown()["expires_at"]
 
     def unavailable(*_):
         raise SourceError("timeout")
@@ -699,6 +723,185 @@ def test_learned_fact_stops_serving_when_its_original_message_changes(store):
     assert verify(runtime, scope, [source_rows]) == [[]]
 
 
+def test_dashboard_reviews_the_pending_revision_with_live_evidence(store):
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from gb_fakes import message
+    from test_dashboard import identify
+
+    from larkagentd.gateway.access import Access
+    from larkagentd.gateway.learned_page import correction_review
+    from larkagentd.knowledge.runtime import GroupBrainRuntime
+    from larkagentd.toolservice.groupbrain_memory import group_memory_correct
+
+    cfg = GroupBrainConfig(enabled=True)
+    scope = f"group:{CHAT}"
+    original = replace(
+        message(
+            "om_blue", chat_id=CHAT, sender_id="u", text="The pilot uses blue tags."
+        ),
+        created_at=datetime.now(timezone.utc),
+    )
+    correction = replace(
+        original, message_id="om_green", text="The pilot now uses green tags."
+    )
+    messages = {m.message_id: m for m in (original, correction)}
+    runtime = GroupBrainRuntime(
+        store.engine,
+        cfg,
+        source=SimpleNamespace(
+            messages=lambda _group, ids: [messages[i] for i in ids if i in messages]
+        ),
+    )
+    access = Access(store, ("admin@example.com",), group_brain=cfg, runtime=runtime)
+    change(access, "POST", "groups", {"group_id": CHAT})
+    saved = save_learned_fact(runtime, scope, original, original.text)
+    proposed = group_memory_correct(
+        SimpleNamespace(
+            chat_type="group",
+            chat_id=CHAT,
+            owner=OWNER,
+            group_brain=runtime,
+            turn={"message_id": correction.message_id},
+        ),
+        {
+            "memory_id": saved["id"],
+            "replacement": correction.text,
+            "reason": "New group decision",
+            "evidence": correction.text,
+        },
+    )
+    assert proposed["state"] == "pending"
+    assert proposed["revision"] == 2
+    identify(store, "t:admin", "admin@example.com")
+    with store.engine.begin() as conn:
+        token, _ = access.issue(conn, "t:admin")
+        session, _ = access.exchange(conn, token)
+        actor = access.authenticate(conn, session)
+        assert access.knowledge_store.catalog_counts(conn, scope)["pending_review"] == 1
+    path = ["groups", CHAT, "knowledge", "candidates"]
+    member = SimpleNamespace(
+        group_member=lambda group, owner: (group, owner) == (CHAT, "admin")
+    )
+    outsider = SimpleNamespace(group_member=lambda *_: False)
+    _, hidden = correction_review(access, session, path, "GET", {}, actor, outsider)
+    assert "content" not in hidden["candidates"][0]
+    _, shown = correction_review(access, session, path, "GET", {}, actor, member)
+    (pending,) = shown["candidates"]
+    assert pending["state"] == "pending" and pending["status"] == "verified"
+    assert pending["content"] == correction.text
+    approve = [*path, saved["id"], "approve"]
+    body = {
+        "revision": 2,
+        "content_hash": pending["content_hash"],
+        "acknowledge_group_sharing": True,
+    }
+    messages[correction.message_id] = replace(
+        correction, text="The plan is still open."
+    )
+    with pytest.raises(AccessError, match="source_unavailable"):
+        correction_review(access, session, approve, "POST", body, actor, member)
+    messages[correction.message_id] = correction
+    _, approved = correction_review(
+        access, session, approve, "POST", body, actor, member
+    )
+    assert approved["status"] == "active"
+    with store.engine.begin() as conn:
+        records, _ = list_records(conn, scope, None)
+        assert records[0]["sanitized_content"] == correction.text
+        assert access.knowledge_store.catalog_counts(conn, scope)["pending_review"] == 0
+        assert (
+            access.dispatch(
+                conn,
+                actor,
+                "POST",
+                ["groups", CHAT, "knowledge", "learned", saved["id"], "retire"],
+                {},
+            )[0]
+            == 200
+        )
+        assert list_records(conn, scope, None) == ([], None)
+
+
+def test_memory_recall_looks_past_stale_matches_and_never_cites_expired_facts(store):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+
+    from gb_fakes import message
+    from sqlalchemy import update
+
+    from larkagentd.knowledge.runtime import GroupBrainRuntime
+    from larkagentd.knowledge.tables import gb_memory_revisions
+    from larkagentd.toolservice.groupbrain_knowledge import (
+        group_knowledge_search,
+        group_knowledge_sources,
+    )
+
+    svc, _, _ = room(store)
+    for chat in (CHAT, "oc_other"):
+        change(svc.access, "POST", "groups", {"group_id": chat})
+    now = datetime.now(timezone.utc)
+    good = replace(
+        message(
+            "om_valid",
+            chat_id=CHAT,
+            sender_id="u",
+            text="Prosedur untuk PLAN-42 memakai templat biru.",
+        ),
+        created_at=now,
+    )
+    stale = replace(
+        good,
+        message_id="om_stale",
+        text="Keputusan PLAN-42: prosedur persetujuan masih tertunda.",
+    )
+    other = replace(
+        good,
+        message_id="om_other",
+        chat_id="oc_other",
+        text="Keputusan PLAN-42: prosedur persetujuan berbeda.",
+    )
+    messages = {m.message_id: m for m in (good, stale, other)}
+    runtime = GroupBrainRuntime(
+        store.engine,
+        GroupBrainConfig(enabled=True),
+        source=SimpleNamespace(
+            messages=lambda _group, ids: [messages[i] for i in ids if i in messages]
+        ),
+    )
+    scope = f"group:{CHAT}"
+    saved = save_learned_fact(runtime, scope, good, good.text)
+    save_learned_fact(runtime, scope, stale, stale.text)
+    save_learned_fact(runtime, "group:oc_other", other, other.text)
+    del messages[stale.message_id]
+    ctx = SimpleNamespace(
+        chat_type="group",
+        chat_id=CHAT,
+        owner=OWNER,
+        group_brain=runtime,
+        job_note=None,
+        conversation={},
+    )
+    result = group_knowledge_search(
+        ctx,
+        {"query": "Apa prosedur persetujuan PLAN-42?", "kinds": ["memory"], "limit": 1},
+    )
+    (fact,) = result["results"]
+    assert fact["text"] == good.text
+    lookup = {"evidence_ids": [fact["evidence_id"]]}
+    assert group_knowledge_sources(ctx, lookup)["evidence"][0]["status"] == "valid"
+    with runtime.connection() as conn:
+        conn.execute(
+            update(gb_memory_revisions)
+            .where(gb_memory_revisions.c.memory_id == saved["id"])
+            .values(expires_at=now - timedelta(days=1))
+        )
+    assert (
+        group_knowledge_sources(ctx, lookup)["evidence"][0]["status"] == "unavailable"
+    )
+
+
 @pytest.mark.parametrize(
     "kind,content",
     [
@@ -717,6 +920,8 @@ def test_create_verifies_native_owner_and_group_manage_before_releasing_link(
             self.calls = []
             self.owner = "ou_bot"
             self.group = False
+            self.matrix = []
+            self.page = None
 
         def _invoke(self, command, args):
             self.calls.append((command, args))
@@ -725,7 +930,17 @@ def test_create_verifies_native_owner_and_group_manage_before_releasing_link(
             if command[1] == "+workbook-info":
                 return {"sheets": [{"sheet_id": "tab_1"}]}
             if command[1] == "+add-slide":
+                self.page = ET.fromstring(args[args.index("--slide") + 1])
+                self.page.set("id", "slide_1")
                 return {"slide_id": "slide_1"}
+            if command[1] == "+xml-get":
+                deck = ET.Element("presentation")
+                deck.append(self.page)
+                return {
+                    "xml_presentation": {
+                        "content": ET.tostring(deck, encoding="unicode")
+                    }
+                }
             if command[:2] == ("drive", "+member-add"):
                 self.group = True
                 return {}
@@ -745,6 +960,14 @@ def test_create_verifies_native_owner_and_group_manage_before_releasing_link(
                 )
             if command[0] == "api":
                 endpoint = command[2]
+                if endpoint.endswith("/raw_content"):
+                    return {"content": "A quick update."}
+                if endpoint.endswith("/values") and command[1] == "PUT":
+                    request = json.loads(args[args.index("--data") + 1])["valueRange"]
+                    assert request["range"] == "tab_1!A1:B2"
+                    self.matrix = request["values"]
+                if endpoint.endswith("/values/tab_1!A1:B2") and command[1] == "GET":
+                    return {"valueRange": {"values": self.matrix}}
                 if endpoint.endswith("/auth"):
                     assert (
                         json.loads(args[args.index("--params") + 1])["action"]
@@ -783,6 +1006,150 @@ def test_create_verifies_native_owner_and_group_manage_before_releasing_link(
     assert (
         sum(call[0][1] in ("+create", "+workbook-create") for call in reader.calls) == 1
     )
+
+
+def test_sheet_write_verifies_the_requested_rectangle():
+    from larkagentd.lark.links import parse_link
+
+    class Reader:
+        def _invoke(self, command, args):
+            if command[1] == "PUT":
+                request = json.loads(args[args.index("--data") + 1])["valueRange"]
+                assert request == {"range": "tab_1!Z2:AA2", "values": [[9, 12]]}
+                return {"updatedCells": 2}
+            assert command == (
+                "api",
+                "GET",
+                "/open-apis/sheets/v2/spreadsheets/ArtifactToken1234/values/tab_1!Z2:AA2",
+            )
+            return {"valueRange": {"values": self.values}}
+
+    reader = Reader()
+    link = parse_link("https://example.larksuite.com/sheets/ArtifactToken1234")
+    files = LarkFiles(reader, None, None)
+    files.set_cells(link, "tab_1", "Z2", "[[9,12]]")
+    reader.values = [[7, 12]]
+    with pytest.raises(LarkError, match="write_outcome_unknown"):
+        files.verify_cells(link, "tab_1", "Z2", "[[9,12]]")
+    reader.values = [[9, 12]]
+    files.verify_cells(link, "tab_1", "Z2", "[[9,12]]")
+
+
+def test_sheet_preview_honors_a_selected_tab_without_a_range(monkeypatch, tmp_path):
+    from larkagentd.lark.links import parse_link
+    from larkagentd.toolservice.larkcli import LarkReader
+
+    url = "https://example.larksuite.com/sheets/ArtifactToken1234"
+    reader = LarkReader(("lark-cli",), "app_example", "fixture", tmp_path)
+    files = LarkFiles(reader, None, None)
+    monkeypatch.setattr(files, "require", lambda *_: None)
+
+    def invoke(command, _args):
+        if command == ("sheets", "+workbook-info"):
+            return {
+                "sheets": [
+                    {"sheet_id": "tab_1", "sheet_name": "Summary"},
+                    {
+                        "sheet_id": "tab_2",
+                        "sheet_name": "Pilot results",
+                        "row_count": 10,
+                        "column_count": 2,
+                    },
+                ]
+            }
+        assert command == (
+            "api",
+            "GET",
+            "/open-apis/sheets/v2/spreadsheets/ArtifactToken1234/values/tab_2!A1:B10",
+        )
+        return {"valueRange": {"values": [["Invited", 30]]}}
+
+    monkeypatch.setattr(reader, "_invoke", invoke)
+    result = files.read(None, parse_link(url), sheet_id="Pilot results")
+    assert result["preview"]["sheet_name"] == "Pilot results"
+    assert result["preview"]["rows"] == [["Invited", 30]]
+
+
+def test_slide_verification_rejects_title_without_chart(monkeypatch):
+    from larkagentd.lark.links import parse_link
+    from larkagentd.toolservice.larkfiles import _slide_xml
+
+    xml = _slide_xml(
+        {
+            "title": "Pilot results",
+            "chart": {
+                "categories": ["First week", "Second week"],
+                "series": [{"name": "Sign-ups", "values": [24, 30]}],
+            },
+        }
+    )
+    deck = ET.Element("presentation")
+    page = ET.fromstring(xml)
+    page.set("id", "page_1")
+    deck.append(page)
+    files = LarkFiles(None, None, None)
+    monkeypatch.setattr(
+        files,
+        "_cli",
+        lambda *_: {"xml_presentation": ET.tostring(deck, encoding="unicode")},
+    )
+    link = parse_link("https://example.larksuite.com/slides/ArtifactToken1234")
+    files.verify_slides(link, {"page_1": xml})
+    data = list(page)[0]
+    data.remove(list(data)[-1])
+    with pytest.raises(LarkError, match="write_outcome_unknown"):
+        files.verify_slides(link, {"page_1": xml})
+
+
+def test_slide_replace_uses_full_page_content_and_verifies_the_target(store):
+    from larkagentd.lark.links import parse_link
+
+    title = "Review outcome"
+    link = parse_link("https://example.larksuite.com/slides/ArtifactToken1234")
+
+    class Reader:
+        page = None
+
+        def _invoke(self, command, args):
+            if command == ("drive", "+member-list"):
+                return {
+                    "items": [
+                        {"member_type": "openchat", "member_id": CHAT, "perm": "edit"}
+                    ]
+                }
+            if command[0] == "api":
+                assert command[2].endswith("/auth")
+                return {"auth_result": True}
+            if command == ("slides", "+update-slide"):
+                assert "--slide" not in args
+                assert args[args.index("--slide-id") + 1] == "page_1"
+                self.page = ET.fromstring(args[args.index("--content") + 1])
+                self.page.set("id", "page_1")
+                return {}
+            assert command == ("slides", "+xml-get")
+            root = ET.Element("presentation")
+            root.append(self.page)
+            return {
+                "xml_presentation": {"content": ET.tostring(root, encoding="unicode")}
+            }
+
+    svc, _, _ = room(store)
+    ctx = SimpleNamespace(
+        chat_type="group",
+        chat_id=CHAT,
+        lark_allowed={link.token},
+        turn={"job_id": "edit-slide"},
+    )
+    result = LarkFiles(Reader(), store, svc.vault).edit(
+        ctx,
+        link,
+        {
+            "action": "replace",
+            "slide_id": "page_1",
+            "content": json.dumps({"title": title, "bullets": ["Review on Monday."]}),
+        },
+    )
+    assert result["updated"] is True and result["verified"] is True
 
 
 def test_dm_setup_checks_live_membership_of_an_admitted_group(store):

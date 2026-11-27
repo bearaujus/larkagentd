@@ -337,9 +337,9 @@ export function GroupBrain({ groupId }: { groupId: string }) {
             </fieldset>
             {draft.memory && (
               <p className="muted">
-                <strong>Passive learning.</strong> At the end of each turn, the
-                assistant can save a useful fact supported by this group’s
-                messages.
+                <strong>Passive learning.</strong> After a successful reply, the
+                assistant can save a useful fact supported by a person’s message
+                in this group.
               </p>
             )}
             <label className="group-brain-history">
@@ -371,10 +371,9 @@ export function GroupBrain({ groupId }: { groupId: string }) {
             <dd>{value.counts.discussions}</dd>
           </div>
           <div>
-            <dt>Memories</dt>
+            <dt>Saved facts</dt>
             <dd>{value.counts.memories}</dd>
           </div>
-          <div></div>
           <div>
             <dt>Pending review</dt>
             <dd>{value.counts.pending_review}</dd>
@@ -452,26 +451,28 @@ export function GroupBrain({ groupId }: { groupId: string }) {
         <div className="panel-body group-brain-lists group-brain-review-lists">
           <section aria-labelledby={`brain-review-${groupId}`}>
             <h3 id={`brain-review-${groupId}`}>
-              Notes to review{" "}
+              Corrections to review{" "}
               <span className="group-brain-count">
                 {value.counts.pending_review}
               </span>
             </h3>
             {candidates.isPending ? (
-              <Loading label="Loading notes for review" />
+              <Loading label="Loading corrections for review" />
             ) : candidates.isError ? (
               <Failure
                 error={candidates.error}
                 retry={() => void candidates.refetch()}
               />
             ) : candidates.data.candidates.length === 0 ? (
-              <p>No notes waiting for review.</p>
+              <p>No corrections waiting for review.</p>
             ) : (
               <ul>
                 {candidates.data.candidates.map((candidate) => {
                   const canReadSource =
                     candidate.content !== undefined &&
                     candidate.reason !== undefined;
+                  const canApprove =
+                    canReadSource && candidate.status === "verified";
                   const itemPath = `candidates/${encodeURIComponent(candidate.memory_id)}`;
                   const approvalIdentity = `${candidate.revision}:${candidate.content_hash}`;
                   return (
@@ -480,28 +481,37 @@ export function GroupBrain({ groupId }: { groupId: string }) {
                       key={`${candidate.memory_id}-${candidate.revision}`}
                     >
                       <div className="group-brain-review-copy">
-                        <strong>{candidate.category}</strong>
-                        <span>
-                          {candidate.state} · revision {candidate.revision} ·
-                          proposed by {candidate.proposed_by} ·{" "}
-                          {candidate.created_at}
-                        </span>
+                        <strong>Proposed revision {candidate.revision}</strong>
                         {canReadSource ? (
                           <>
                             <p>{candidate.content}</p>
-                            <p>Reason: {candidate.reason}</p>
+                            <p>{candidate.reason}</p>
+                            {candidate.sources?.map((source) => (
+                              <blockquote key={source.source_id}>
+                                <p>{source.excerpt}</p>
+                                {source.url && (
+                                  <a
+                                    href={source.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    Open source message
+                                  </a>
+                                )}
+                              </blockquote>
+                            ))}
                           </>
                         ) : (
                           <p>
-                            Text is hidden because the reviewer cannot see its
-                            source.
+                            {candidate.status === "temporarily_unavailable"
+                              ? "Lark did not respond to the source check. Refresh to try again."
+                              : "The correction is hidden until its source can be verified."}
                           </p>
                         )}
-                        <span>Content hash: {candidate.content_hash}</span>
                       </div>
                       {canEdit && (
                         <div className="group-brain-review-controls">
-                          {canReadSource && candidate.state === "candidate" && (
+                          {canApprove && (
                             <label className="group-brain-ack">
                               <input
                                 type="checkbox"
@@ -519,13 +529,13 @@ export function GroupBrain({ groupId }: { groupId: string }) {
                                   }))
                                 }
                               />
-                              I confirm this note may be shared with everyone in
-                              this group
+                              I confirm this correction can be shared with the
+                              group
                             </label>
                           )}
-                          {candidate.state === "candidate" && (
+                          {candidate.state === "pending" && (
                             <>
-                              {canReadSource && (
+                              {canApprove && (
                                 <button
                                   type="button"
                                   className="primary"
@@ -544,7 +554,7 @@ export function GroupBrain({ groupId }: { groupId: string }) {
                                         content_hash: candidate.content_hash,
                                         acknowledge_group_sharing: true,
                                       },
-                                      "Note approved.",
+                                      "Correction approved.",
                                     )
                                   }
                                 >
@@ -589,29 +599,13 @@ export function GroupBrain({ groupId }: { groupId: string }) {
                                         rejectReasons[candidate.memory_id] ??
                                         "not_accurate",
                                     },
-                                    "Note rejected.",
+                                    "Correction rejected.",
                                   )
                                 }
                               >
                                 Reject
                               </button>
                             </>
-                          )}
-                          {candidate.state === "active" && (
-                            <button
-                              type="button"
-                              className="danger-button"
-                              disabled={busy || locked}
-                              onClick={() =>
-                                void reviewAction(
-                                  `memory/${encodeURIComponent(candidate.memory_id)}/revoke`,
-                                  {},
-                                  "Approved note revoked.",
-                                )
-                              }
-                            >
-                              Revoke
-                            </button>
                           )}
                         </div>
                       )}

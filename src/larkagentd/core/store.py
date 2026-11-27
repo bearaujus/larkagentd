@@ -1103,6 +1103,31 @@ class Store:
         ).scalar_one_or_none()
         if current is None:
             return False
+        if citations := fields.get("message_citations"):
+            prior = current.get("message_citations") or {}
+            generation = current.get("gb_generation")
+            links = (
+                prior.get("links", {})
+                if prior.get("session_id") == citations["session_id"]
+                and prior.get("generation") == generation
+                else {}
+            )
+            fields["message_citations"] = {
+                "session_id": citations["session_id"],
+                "generation": generation,
+                "links": dict(list({**links, **citations["links"]}.items())[-50:]),
+            }
+        if candidate := fields.get("passive_candidate"):
+            session_id = candidate["session_id"]
+            turn = self.latest_turn(conn, job_id)
+            if (
+                turn is None
+                or turn["session_id"] != session_id
+                or turn["status"] != "running"
+                or (current.get("passive_candidate") or {}).get("session_id")
+                == session_id
+            ):
+                return False
         conn.execute(
             update(jobs)
             .where(jobs.c.id == job_id)

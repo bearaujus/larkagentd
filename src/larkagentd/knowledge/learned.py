@@ -18,13 +18,6 @@ from .tables import (
 )
 
 
-def live_messages(runtime, scope, ids):
-    try:
-        return read_messages(runtime.source, scope, ids)
-    except Exception:
-        return {}
-
-
 def read_messages(source, scope, ids):
     if source is None:
         raise SourceError("unavailable")
@@ -41,23 +34,32 @@ def read_messages(source, scope, ids):
 
 def verify_candidate(runtime, scope, owner, candidate):
     """Read the proposed evidence live before acquiring any database locks."""
+    return candidate_evidence(runtime, scope, owner, candidate)[1]
+
+
+def candidate_evidence(runtime, scope, owner, candidate):
     ids = candidate["ids"]
-    live = live_messages(runtime, scope, ids)
-    if set(live) != set(ids):
-        return None
+    try:
+        live = read_messages(runtime.source, scope, ids)
+    except SourceError as exc:
+        if exc.code in ("not_found", "forbidden"):
+            return "source_changed", None
+        return "source_unavailable", None
+    if not ids or set(live) != set(ids):
+        return "source_changed", None
     if candidate["current_only"] and live[ids[0]].sender_id != owner:
-        return None
+        return "source_changed", None
     oldest = datetime.now(timezone.utc) - timedelta(
         days=runtime.config.source_retention_days
     )
     if any(message.created_at <= oldest for message in live.values()):
-        return None
+        return "source_expired", None
     sources = [sanitize(message.text) for message in live.values()]
     if any(source.reasons or not source.text for source in sources):
-        return None
+        return "source_rejected", None
     if not any(candidate["evidence"] in source.text for source in sources):
-        return None
-    return live
+        return "source_changed", None
+    return "verified", live
 
 
 def activate_candidate(conn, runtime, scope, owner, args, live, generation):
@@ -69,7 +71,7 @@ def activate_candidate(conn, runtime, scope, owner, args, live, generation):
     Catalog().upsert_messages(
         conn, scope, live.values(), retention_days=runtime.config.source_retention_days
     )
-    memory = Memory()
+    memory = Memory(runtime)
     result = memory.propose(conn, scope, owner, args["content"], args["category"], live)
     if result.get("duplicate"):
         return "duplicate"
@@ -90,6 +92,7 @@ def activate_candidate(conn, runtime, scope, owner, args, live, generation):
         digest,
         "verified_group_source",
         True,
+        lexical_only=True,
     )
     if activated.get("status") != "active":
         raise RuntimeError("Memory activation failed")
@@ -106,6 +109,7 @@ def references(conn, scope, memory_id, revision):
                 gb_source_refs.c.visibility_status,
                 gb_messages.c.content_hash,
                 gb_messages.c.revision,
+                gb_messages.c.expires_at,
                 gb_source_refs.c.source_revision,
             )
             .join(
@@ -136,6 +140,30 @@ def references(conn, scope, memory_id, revision):
         .all()
     )
     return [dict(row) for row in rows]
+
+
+def active_revisions(scope, ids=None):
+    """Current unexpired memory revisions within one group."""
+    rows = (
+        select(gb_memory.c.id, gb_memory.c.current_revision)
+        .join(
+            gb_memory_revisions,
+            and_(
+                gb_memory_revisions.c.group_key == gb_memory.c.group_key,
+                gb_memory_revisions.c.memory_id == gb_memory.c.id,
+                gb_memory_revisions.c.revision == gb_memory.c.current_revision,
+            ),
+        )
+        .where(
+            gb_memory.c.group_key == scope,
+            gb_memory.c.state == "active",
+            gb_memory_revisions.c.status == "active",
+            gb_memory_revisions.c.expires_at > func.now(),
+        )
+    )
+    if ids is not None:
+        rows = rows.where(gb_memory.c.id.in_(ids))
+    return rows
 
 
 def verify(runtime, scope, reference_sets):
@@ -227,6 +255,8 @@ def list_records(conn, scope, after):
                 gb_memory.c.current_revision,
                 gb_memory_revisions.c.sanitized_content,
                 gb_memory_revisions.c.approved_by,
+                gb_memory_revisions.c.approved_at,
+                gb_memory_revisions.c.expires_at,
             )
             .join(
                 gb_memory_revisions,
@@ -240,6 +270,7 @@ def list_records(conn, scope, after):
                 gb_memory.c.group_key == scope,
                 *boundary,
                 gb_memory.c.state == "active",
+                gb_memory_revisions.c.status == "active",
                 gb_memory_revisions.c.expires_at > func.now(),
             )
             .order_by(gb_memory.c.created_at.desc(), gb_memory.c.id.desc())

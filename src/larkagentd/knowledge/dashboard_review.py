@@ -35,8 +35,6 @@ class MemoryReview:
             "memory"
         ):
             raise KnowledgeError("disabled", 409)
-        if not Memory.reviewer_can_read(conn, scope, actor.get("email"), memory_id):
-            raise KnowledgeError("source_unavailable", 403)
         if not isinstance(body, dict) or set(body) != {
             "revision",
             "content_hash",
@@ -54,6 +52,8 @@ class MemoryReview:
             or body["acknowledge_group_sharing"] is not True
         ):
             raise KnowledgeError("invalid_value")
+        if actor.get("correction_evidence") != (scope, memory_id, revision):
+            raise KnowledgeError("source_unavailable", 403)
         row = conn.execute(
             select(gb_memory_revisions.c.content_hash).where(
                 gb_memory_revisions.c.group_key == scope,

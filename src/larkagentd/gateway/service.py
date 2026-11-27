@@ -13,7 +13,7 @@ from ..core.auth import AuthError, transient_auth_error
 from ..core.diagnostics import actor_ref, emit, job_fields
 from ..core.fields import lark_app_owner
 from ..core.googlelinks import links as google_links
-from ..core.scopes import BASELINE, group_chat_scope
+from ..core.scopes import BASELINE, HUMAN_GROUP_TOOLS, group_chat_scope
 from ..core.store import (
     USAGE_COUNTS,
     database_time,
@@ -30,14 +30,21 @@ from ..knowledge.policy import store as group_brain_store
 from ..lark import usage_text
 from ..lark.attachments import resolve as resolve_attachments
 from ..lark.attachments import thread_images
-from ..lark.card import confirmation_fallback, reply_card
+from ..lark.card import confirmation_fallback, reply_card, source_answer
 from ..lark.card_delivery import deliver_card
 from ..lark.cards import choice_pages, json_card
 from ..lark.inbound import IMAGE, takes_over, wants_setup
+from ..lark.message_links import (
+    FORWARD_REQUEST,
+    cited_message,
+    message_citation_only,
+    native_copied_reply,
+)
 from ..lark.progress import Progress
 from ..lark.render import answer_room, attach_code, attachment_receipts, with_blocks
 from ..lark.ui_text import (
     AGENT_FAILURES,
+    APP_FILE_REFUSALS,
     BUSY_REPLY,
     DIRECT_HELP,
     FAILURE_MESSAGES,
@@ -380,6 +387,8 @@ class Service:
         usage_footer="",
         fallback_card=None,
         attachments=(),
+        source_message_id=None,
+        native_reply=None,
     ):
         guard = {"gb_group": gb[0], "gb_generation": gb[1]} if gb else {}
         self.store.add_job(
@@ -403,6 +412,8 @@ class Service:
                         "usage_footer": usage_footer,
                         "fallback_card": fallback_card,
                         "attachments": list(attachments),
+                        "source_message_id": source_message_id,
+                        "native_reply": native_reply,
                     }
                     if single_reply
                     else {}
@@ -1214,6 +1225,8 @@ class Service:
             usage_footer="",
             attachments=[],
             attachment_keys=[],
+            source_message_id=None,
+            native_reply=None,
             gb_group=None,
         )
 
@@ -1495,7 +1508,10 @@ class Service:
                     text=words,
                     requester_name=item.get("speaker_name"),
                     group=group,
-                    group_tools=sorted(group_tools | BASELINE)
+                    group_tools=sorted(
+                        (group_tools | BASELINE)
+                        - (HUMAN_GROUP_TOOLS if lark_app_owner(owner) else set())
+                    )
                     if group and group_tools is not None
                     else None,
                     model=model,
@@ -1651,6 +1667,13 @@ class Service:
                     return
                 current = state.get("busy") == job["id"]
                 if current:
+                    if (
+                        group
+                        and lark_app_owner(owner)
+                        and len(progress.tool_names) == 1
+                    ):
+                        only_tool = next(iter(progress.tool_names))
+                        reply = APP_FILE_REFUSALS.get(only_tool, reply)
                     if progress.tool_names == {"run_query"}:
                         query_errors = conn.scalars(
                             select(query_activity.c.error_code)
@@ -1698,8 +1721,37 @@ class Service:
                     attachments = [*code_files, *files]
                     reply_to = job["payload"]["message_id"]
                     reply_chat = job["payload"].get("chat") or state["chat"]
+                    source = None
+                    native_reply = None
+                    if (
+                        group
+                        and not previews
+                        and not attachments
+                        and confirmation is None
+                    ):
+                        noted = self.store.job_payload(conn, job["id"]) or {}
+                        source = cited_message(answer, noted, session_id, reply_chat)
+                        native_reply = native_copied_reply(
+                            answer, job["payload"].get("text", ""), source
+                        )
+                        if (
+                            gb
+                            and not source
+                            and not native_reply
+                            and message_citation_only(answer)
+                        ):
+                            answer = body = (
+                                "I couldn’t verify the original Lark message."
+                            )
+                            emit(
+                                "delivery.source_preview",
+                                **job_fields(job),
+                                outcome="unverified",
+                            )
                     try:
-                        card = reply_card(answer, body, previews, footer, confirmation)
+                        card = reply_card(
+                            answer, body, previews, footer, confirmation, source=source
+                        )
                     except (KeyError, ValueError, TypeError) as exc:
                         emit(
                             "card.build_failed",
@@ -1707,6 +1759,14 @@ class Service:
                             error_type=type(exc).__name__,
                         )
                         card = None
+                    if source:
+                        attribution = " · ".join(
+                            x for x in (source.get("author"), source.get("time")) if x
+                        )
+                        heading = "Original message" + (
+                            " · " + attribution if attribution else ""
+                        )
+                        body = f"{source_answer(body, source)}\n\n{heading}\n{source['excerpt']}"
                     self.out(
                         conn,
                         owner,
@@ -1723,6 +1783,14 @@ class Service:
                         answer_to=owner.partition(":")[2] if group else None,
                         gb=gb,
                         attachments=attachments if confirmation is None else (),
+                        native_reply=native_reply,
+                        source_message_id=(
+                            source["message_id"]
+                            if source
+                            and answer.strip() == source["markup"]
+                            and FORWARD_REQUEST.search(job["payload"].get("text", ""))
+                            else None
+                        ),
                     )
                     if confirmation and attachments:
                         self.out_files(
@@ -2040,7 +2108,7 @@ class Service:
         with self.store.engine.begin() as conn:
             turn = self.store.latest_turn(conn, job["id"])
             session_id = turn["session_id"] if turn else f"{job['id']}:1"
-            if turn is None and request.get("group"):
+            if turn is None and request.get("group") and not lark_app_owner(owner):
                 runtime = self.access.knowledge_runtime
                 scope = group_chat_scope(chat)
                 if runtime is not None and runtime.source is not None and scope:
