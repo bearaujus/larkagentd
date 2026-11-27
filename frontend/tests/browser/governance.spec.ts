@@ -280,3 +280,22 @@ test("governance screenshots with synthetic fixtures", async ({
     animations: "disabled",
   });
 });
+
+test("an unpriced overview shows actual activity and links to the rates control", async ({
+  page,
+  state,
+}) => {
+  state.pricing = "none";
+  await governanceFixture(page);
+  await page.goto("/dashboard/");
+  const board = page.getByRole("region", { name: "Cost overview" });
+  await expect(board.getByText("Unavailable", { exact: true })).toBeVisible();
+  await expect(board.getByText("0 of 438 sessions priced")).toBeVisible();
+  await expect(page.getByLabel("Trend metric")).toHaveValue("total_tokens");
+  await page.getByLabel("Trend metric").selectOption("estimated_cost_usd");
+  await page.getByRole("button", { name: "Show recorded tokens" }).click();
+  await expect(page.getByLabel("Trend metric")).toHaveValue("total_tokens");
+  await board.getByRole("link", { name: "View model rates" }).click();
+  await expect(page).toHaveURL(/governance#model-rates$/);
+  await expect(page.locator("#model-rates")).toBeFocused();
+});

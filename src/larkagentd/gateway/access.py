@@ -9,7 +9,7 @@ from sqlalchemy import case, delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from ..core.diagnostics import actor_ref, emit
-from ..core.fields import normalize_email
+from ..core.fields import lark_app_owner, normalize_email
 from ..core.scopes import DEFAULT_GROUP_TOOLS, is_scopable
 from ..core.store import (
     dashboard_limits,
@@ -152,6 +152,8 @@ class Access:
         return None
 
     def actor_email(self, conn, owner):
+        if lark_app_owner(owner):
+            return None
         return (
             conn.scalar(
                 select(gateway_identities.c.email).where(
@@ -201,6 +203,8 @@ class Access:
         self, owner, transport, *, group=None, force=False, governance=None
     ):
         """Verify email only for dashboard, scoped group policy or quota checks."""
+        if lark_app_owner(owner):
+            return
         with self.store.engine.begin() as conn:
             group_mode = (
                 self.mode(conn, group_scope(group)) if group is not None else None

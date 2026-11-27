@@ -24,11 +24,14 @@ from ..core.artifacts import Artifacts
 from ..core.crypto import Vault
 from ..core.diagnostics import actor_ref, configure_logging, emit
 from ..core.extensions import load_extension
+from ..core.fields import lark_app_owner
 from ..core.scopes import group_chat_scope, is_scopable
 from ..core.store import Store
 from ..gateway.service import Service
+from ..knowledge.attachment_sync import AttachmentSync
 from ..knowledge.library import SourceLibrary
 from ..knowledge.runtime import build_runtime
+from ..knowledge.wiki import WikiReader
 from ..skills.skills import SkillStore
 from . import activity
 from .gitlab import GitlabReader
@@ -372,6 +375,14 @@ class ToolService:
                 return 200, google_refusal(
                     code, self.google.email if self.google else None
                 )
+            if name == "run_query" and code == "maxcompute_estimate_denied":
+                return 200, {
+                    "ok": False,
+                    "error": code,
+                    "retryable": False,
+                    "query_executed": False,
+                    "note": "The scan estimate was denied. The query was not submitted.",
+                }
             if name in ("lark_read", "lark_image", "lark_file_read") and (
                 code == "not_configured" or code in LARK_READ_REFUSALS
             ):
@@ -442,6 +453,10 @@ class ToolService:
         decision = self.registry.decide(turn["owner"], name)
         if not decision.allowed:
             return decision
+        if lark_app_owner(turn["owner"]):
+            tool = self.tools.get(name)
+            if tool is None or tool.risk != "read":
+                return Decision(False, "denied")
         return self.group_decision(turn, name)
 
     def group_decision(self, turn, name):
@@ -488,6 +503,8 @@ class ToolService:
                     "group_actions",
                     "tool_effects",
                     "knowledge_sources",
+                    "knowledge_lark_attachments",
+                    "knowledge_lark_passages",
                 ):
                     conn.execute(text(f"SELECT 1 FROM {table} LIMIT 0"))
         except Exception:
@@ -585,7 +602,9 @@ def build_tools(config, store):
         config.service_key,
         tools=tools,
         vault=vault,
-        source_library=SourceLibrary(store),
+        source_library=SourceLibrary(
+            store, wiki=WikiReader(lark_reader) if lark_reader else None
+        ),
         gateway_app=os.getenv("LARK_APP_ID"),
         web=WebSearch(os.environ["BRAVE_SEARCH_API_KEY"])
         if os.getenv("BRAVE_SEARCH_API_KEY")
@@ -639,6 +658,14 @@ def main():
     server = ThreadingHTTPServer((config.host, config.port), make_handler(tools))
     # Documents are read here (the Lark CLI is in this process), so their jobs run here too.
     knowledge_stop = threading.Event()
+    if tools.source_library.wiki:
+        sync = AttachmentSync(store, tools.source_library.wiki, config.group_brain)
+        threading.Thread(
+            target=sync.run,
+            args=(knowledge_stop,),
+            daemon=True,
+            name="lark-source-sync",
+        ).start()
     if tools.group_brain is not None and tools.group_brain.doc_source is not None:
         from ..knowledge.handlers import DOCUMENT_KINDS
         from ..knowledge.worker import start_worker_threads

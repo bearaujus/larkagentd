@@ -805,14 +805,67 @@ def upgrade():
             sa.Computed("NULLIF(scope, 'workspace')", persisted=True),
             nullable=True,
         ),
-        sa.Column("name", sa.String(), nullable=False),
+        sa.Column("name", sa.String(), nullable=True),
         sa.Column("markdown", sa.Text(), nullable=False),
         sa.Column("server", sa.String(), nullable=True),
         sa.Column("uri", sa.String(), nullable=True),
         sa.ForeignKeyConstraint(
             ["group_scope"], ["gateway_policies.scope"], ondelete="CASCADE"
         ),
-        sa.PrimaryKeyConstraint("scope", "name"),
+        sa.PrimaryKeyConstraint("scope", "id"),
+        sa.UniqueConstraint("scope", "name", name="knowledge_sources_scope_name"),
+    )
+    op.create_table(
+        "knowledge_lark_attachments",
+        sa.Column(
+            "source_id",
+            sa.String,
+            sa.ForeignKey("knowledge_sources.id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+        sa.Column("url", sa.String, nullable=False),
+        sa.Column("title", sa.Text()),
+        sa.Column("kind", sa.String, nullable=False),
+        sa.Column("status", sa.String, nullable=False, server_default="queued"),
+        sa.Column("due", sa.Float, nullable=False, server_default="0"),
+        sa.Column("lease", sa.String),
+        sa.Column("last_success", sa.Float),
+        sa.Column("indexed", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("skipped", sa.Integer, nullable=False, server_default="0"),
+        sa.Column("error", sa.String),
+    )
+    op.create_index("knowledge_lark_due", "knowledge_lark_attachments", ["due"])
+    op.create_table(
+        "knowledge_lark_passages",
+        sa.Column(
+            "source_id",
+            sa.String,
+            sa.ForeignKey("knowledge_lark_attachments.source_id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+        sa.Column("doc", sa.String, primary_key=True),
+        sa.Column("ordinal", sa.Integer, primary_key=True),
+        sa.Column("doc_kind", sa.String, nullable=False),
+        sa.Column("node", sa.String),
+        sa.Column("title", sa.Text, nullable=False),
+        sa.Column("section", sa.Text, nullable=False),
+        sa.Column("body", sa.Text, nullable=False),
+        sa.Column("digest", sa.String, nullable=False),
+        sa.Column("seen", sa.String, nullable=False),
+        sa.Column(
+            "search_vector",
+            postgresql.TSVECTOR(),
+            sa.Computed(
+                "to_tsvector('simple', title || ' ' || section || ' ' || body)",
+                persisted=True,
+            ),
+        ),
+    )
+    op.create_index(
+        "knowledge_lark_search",
+        "knowledge_lark_passages",
+        ["search_vector"],
+        postgresql_using="gin",
     )
     op.create_table(
         "gb_discussion_messages",
@@ -1034,6 +1087,8 @@ def downgrade():
     op.drop_index("gb_participants_sender", table_name="gb_discussion_participants")
     op.drop_table("gb_discussion_participants")
     op.drop_table("gb_discussion_messages")
+    op.drop_table("knowledge_lark_passages")
+    op.drop_table("knowledge_lark_attachments")
     op.drop_table("knowledge_sources")
     op.drop_table("group_knowledge_settings")
     op.drop_table("gb_sync_state")

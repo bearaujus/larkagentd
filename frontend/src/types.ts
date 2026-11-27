@@ -143,6 +143,8 @@ export type Metrics = {
   total_tokens: number;
   turns: number;
   llm_sessions: number;
+  active_people: number;
+  active_groups: number;
   estimated_cost_usd?: string | null;
   priced_sessions?: number;
   unpriced_sessions?: number;
@@ -193,6 +195,7 @@ export type PageResult = {
 export type Summary = {
   period: Period;
   statistics: Metrics;
+  model_spend?: { model: string | null; estimated_cost_usd: string }[];
   monetary_costs_available: boolean;
 };
 export type Dataset = "users" | "models" | "daily" | "llm" | "queries";

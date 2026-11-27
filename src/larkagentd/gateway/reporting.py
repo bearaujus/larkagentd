@@ -360,6 +360,12 @@ class Reporting:
             .filter(e.resource_type == "llm")
             .label("turns"),
             count(e.resource_type == "llm").label("llm_sessions"),
+            func.count(func.distinct(func.nullif(e.requester, "")))
+            .filter(e.resource_type == "llm")
+            .label("active_people"),
+            func.count(func.distinct(func.nullif(e.chat_id, "")))
+            .filter((e.resource_type == "llm") & (e.chat_type == "group"))
+            .label("active_groups"),
             func.sum(e.estimated_cost_usd).label("estimated_cost_usd"),
             count(e.estimated_cost_usd.is_not(None)).label("priced_sessions"),
             count(
@@ -422,6 +428,32 @@ class Reporting:
         raise AccessError(404, "not_found")
 
     @staticmethod
+    def model_spend(conn, frame):
+        """Rank the priced model totals for the full filtered period in the report snapshot."""
+        e = frame.c
+        cost = func.sum(e.estimated_cost_usd)
+        ranked = (
+            select(
+                e.model,
+                cost.label("cost"),
+                func.row_number()
+                .over(order_by=(cost.desc(), e.model))
+                .label("position"),
+            )
+            .where(e.resource_type == "llm", e.estimated_cost_usd.is_not(None))
+            .group_by(e.model)
+            .subquery()
+        )
+        # A null bucket groups all models after the first three; zero is a valid estimate.
+        bucket = case((ranked.c.position <= 3, ranked.c.model)).label("model")
+        rows = conn.execute(
+            select(bucket, func.sum(ranked.c.cost).label("estimated_cost_usd"))
+            .group_by(bucket)
+            .order_by(func.min(ranked.c.position))
+        ).mappings()
+        return [record(row) for row in rows]
+
+    @staticmethod
     def page(values):
         parsed = []
         for key, default, minimum, maximum in (
@@ -451,6 +483,7 @@ class Reporting:
                 return {
                     "period": period,
                     "statistics": statistics,
+                    "model_spend": self.model_spend(conn, frame),
                     "monetary_costs_available": bool(statistics["priced_sessions"]),
                 }
             if dataset == "users":

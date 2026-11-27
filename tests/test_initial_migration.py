@@ -79,6 +79,42 @@ def test_group_setup_and_workspace_sources_have_distinct_scope(store, configurat
     with pytest.raises(IntegrityError), store.engine.begin() as conn:
         conn.execute(
             insert(sources).values(
-                scope="group:missing", name="Missing", markdown="Invalid"
+                id="missing", scope="group:missing", name="Missing", markdown="Invalid"
             )
         )
+
+
+def test_rerunning_alembic_preserves_existing_sources(store, configuration):
+    command.upgrade(configuration, "head")
+    with store.engine.begin() as conn:
+        conn.execute(
+            sources.insert(),
+            [
+                dict(
+                    scope="workspace",
+                    name="Guide",
+                    id="legacy",
+                    markdown="Office hours",
+                    server=None,
+                    uri=None,
+                ),
+                dict(
+                    scope="workspace",
+                    name="Feed",
+                    id="remote",
+                    markdown="",
+                    server="news",
+                    uri="data:news",
+                ),
+            ],
+        )
+    command.upgrade(configuration, "head")
+    with store.engine.begin() as conn:
+        assert conn.execute(
+            select(
+                sources.c.id, sources.c.markdown, sources.c.server, sources.c.uri
+            ).order_by(sources.c.id)
+        ).all() == [
+            ("legacy", "Office hours", None, None),
+            ("remote", "", "news", "data:news"),
+        ]

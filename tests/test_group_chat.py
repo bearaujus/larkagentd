@@ -267,6 +267,107 @@ def test_long_code_is_an_attachment_on_the_same_final_reply(store):
     assert "full code is attached" in json.dumps(post["zh_cn"])
 
 
+def test_csv_attachment_count_is_added_from_the_turn_artifact(store):
+    from larkagentd.core.artifacts import Artifacts
+
+    svc, agent, transport = room(store, "Filtered to the requested channel.")
+    svc.artifacts = Artifacts(store, svc.vault)
+    agent.hook = lambda sid: svc.artifacts.put_file(
+        "t:u",
+        sid,
+        "results.csv",
+        "id\n1\n2\n",
+        rows=2,
+        columns=1,
+        note="The export reached the requested row limit.",
+    )
+    origin = ask(svc, "u", "Export two rows as CSV")
+    drain(svc, transport)
+    (answer,) = transport.sent
+    assert answer["reply_to"] == origin and answer["thread"]
+    assert answer["attachment_keys"] == ["file_results.csv"]
+    assert "**CSV attached** · 2 data rows · 1 column" in answer["text"]
+    assert "The export reached the requested row limit." in answer["text"]
+
+
+def test_single_query_estimate_denial_uses_the_recorded_outcome(store):
+    import time
+
+    from sqlalchemy import select
+
+    from larkagentd.core.store import turns
+    from larkagentd.toolservice import activity
+
+    svc, agent, transport = room(store, "I ran the query, but it was blocked.")
+    agent.events = [
+        ("started", "run_query", {"call": "query"}),
+        ("completed", "run_query", {"call": "query", "error": True}),
+    ]
+
+    def deny_estimate(session_id):
+        with store.engine.connect() as conn:
+            turn = (
+                conn.execute(select(turns).where(turns.c.session_id == session_id))
+                .mappings()
+                .one()
+            )
+        activity_id = activity.start(store, turn, "run_query", "p_test", "query")
+        activity.finish(
+            store,
+            activity_id,
+            time.monotonic(),
+            "failed",
+            error="maxcompute_estimate_denied",
+        )
+
+    agent.hook = deny_estimate
+    ask(svc, "u", "Run a test query")
+    drain(svc, transport)
+    (answer,) = transport.sent
+    assert "before the query was submitted" in answer["text"]
+    assert "I ran the query" not in answer["text"]
+
+
+def test_allowlisted_app_gets_a_group_reply_under_its_own_principal(store):
+    svc, agent, transport = room(store, "Hello from Maxx")
+    svc.lark_app_senders = frozenset({"cli_fixture"})
+    sender, message = "cli_fixture", "om_app"
+    for _ in range(2):
+        svc.receive(
+            "t",
+            sender,
+            GROUP,
+            "app-message:" + message,
+            message,
+            "hello",
+            thread=message,
+            group=True,
+        )
+    drain(svc, transport)
+    (answer,) = transport.sent
+    assert answer["reply_to"] == message
+    assert len(agent.calls) == 1
+    assert not owner_state(store, "t:cli_fixture").get("credential_version")
+
+
+def test_revoking_an_app_discards_its_queued_turn(store):
+    svc, agent, transport = room(store)
+    svc.lark_app_senders = frozenset({"cli_fixture"})
+    svc.receive(
+        "t",
+        "cli_fixture",
+        GROUP,
+        "event",
+        "om_app",
+        "hello",
+        thread="om_app",
+        group=True,
+    )
+    svc.lark_app_senders = frozenset()
+    drain(svc, transport)
+    assert not agent.calls and not transport.sent
+
+
 def test_interrupted_recovery_gets_one_specific_reply_and_folded_usage(store):
     import json
 

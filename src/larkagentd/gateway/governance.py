@@ -8,6 +8,7 @@ from urllib.parse import parse_qs
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
+from ..core.fields import lark_app_owner
 from ..core.store import (
     governance_flex,
     governance_history,
@@ -150,7 +151,7 @@ class Governance:
     def quota(self, conn, owner):
         policy, now = self.policy(conn)
         email = self.access.actor_email(conn, owner)
-        if not email and self.has_active_flex(conn):
+        if not email and not lark_app_owner(owner) and self.has_active_flex(conn):
             return None
         flex = self.flex(conn, email) if email else None
         active = flex and flex["enabled"] and flex["active_limit"] is not None

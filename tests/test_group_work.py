@@ -455,6 +455,32 @@ def test_slide_chart_has_editable_grouped_columns_and_validated_values():
             _slide_xml(invalid)
 
 
+def test_slide_chart_has_editable_percent_stacked_bars():
+    chart = {
+        "type": "percent_stacked_bar",
+        "categories": ["Direct", "Partner"],
+        "series": [
+            {"name": "Low usage", "values": [20, 60]},
+            {"name": "Rejection", "values": [10, 24]},
+            {"name": "Eligible", "values": [70, 116]},
+        ],
+    }
+    slide = ET.fromstring(_slide_xml({"title": "Failure mix", "chart": chart}))
+    assert slide.find(".//{*}chartPlot").get("type") == "bar"
+    assert slide.find(".//{*}chartStack").get("percentage") == "true"
+    assert [
+        (field.get("name"), field.text)
+        for field in slide.findall(".//{*}dim2/{*}chartField")
+    ] == [("Low usage", "20,60"), ("Rejection", "10,24"), ("Eligible", "70,116")]
+    for values in ([20, -1], [20, False]):
+        bad = {
+            **chart,
+            "series": [*chart["series"], {"name": "Other", "values": values}],
+        }
+        with pytest.raises(LarkError, match="bad_slide"):
+            _slide_xml({"title": "Invalid mix", "chart": bad})
+
+
 @pytest.mark.parametrize(
     "oversized, outcome, stage",
     [

@@ -60,6 +60,13 @@ STATUS_STEPS = {
     "describe_table": "Inspect table schema",
     "preview_table": "Read table sample",
     "estimate_query": "Estimate query scan",
+    "mc_cost": "Estimate query scan",
+    "mc_dry_run": "Validate query",
+    "mc_ddl": "Read table definition",
+    "mc_list_partitions": "List table partitions",
+    "optimus_job": "Read query job",
+    "optimus_labels": "Find query jobs",
+    "attach_optimus_file": "Attach job file",
     "run_query": "Run data query",
 }
 
@@ -100,6 +107,12 @@ AGENT_FAILURES = {
     "unknown_execution": "My session was interrupted before I could finish. Please retry in this thread.",
     "other": "I couldn't get an answer right now. Please try again.",
 }
+
+QUERY_ESTIMATE_DENIED = (
+    "MaxCompute denied the scan estimate before the query was submitted. "
+    "There are no query results to share. Ask the query project's administrator "
+    "to review access for your current role."
+)
 
 # Slash commands the Gateway handles itself. Hermes's own commands are not reachable: its
 # API has no command handling, and its shared-state commands are not meant for every user.
@@ -181,7 +194,21 @@ ANSWER_STYLE = (
     "give the next practical step. Use bold for important conclusions, inline code for exact "
     "names, fenced blocks for code, and links for verified sources. Choose a list or table "
     "when it makes the answer easier to read. For a rewrite, use the existing conversation "
-    "unless the requester asks for fresh data."
+    "unless the requester asks for fresh data. When changing the format of a data result, "
+    "keep the same source query, filters and snapshot where possible. Clearly label any "
+    "changes. Give figures only when the sources or actual tool outputs support them. "
+    "Separate a source's published count, a live result and the number of rows shown. "
+    "For a requested sample, show the requested number when available and label any shorter display. "
+    "Use the source data date when verified and call scan size an estimate, not a charge. "
+    "If counts disagree, state what differs and what you could verify. Do not guess the cause. "
+    "Report attachments and write results only once a tool confirms them. The reply adds verified "
+    "CSV attachment counts, so use your answer for relevant context and verified limitations. "
+    "For denied tools, explain the failed operation and distinguish a denied estimate from "
+    "a denied query. Do not infer a user's missing role or an exact grant from a generic denial. "
+    "A bare request to export or visualize an earlier result does not authorize switching to "
+    "related datasets, changing the sample, or broadening access. When the conversation already "
+    "provides the source query, avoid unrelated table and repository searches. Label a table as "
+    "a table and only claim a chart type when the created file uses it."
 )
 STEP_NOTES = (
     "The activity card shows tool steps automatically. Focus on the task and write the answer "

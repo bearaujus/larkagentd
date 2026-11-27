@@ -37,7 +37,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from ..core.diagnostics import emit
-from ..core.fields import normalize_email
+from ..core.fields import LARK_APP_ID, normalize_email
 from . import render
 from .inbound import (
     IMAGE,
@@ -527,12 +527,21 @@ class Lark:
     def message(self, data):
         event = data.event
         message = event.message
-        if (
-            message.chat_type not in ("p2p", "group", "topic_group")
-            or event.sender.sender_type != "user"
-        ):
+        if message.chat_type not in ("p2p", "group", "topic_group"):
             return
         group = message.chat_type != "p2p"
+        sender_type = event.sender.sender_type
+        human = sender_type == "user"
+        allowed = self.config.lark_allowed_senders
+        if human:
+            if "user" not in allowed:
+                return
+        elif (
+            not group
+            or sender_type not in ("app", "bot")
+            or not any(entry != "user" for entry in allowed)
+        ):
+            return
         mentions = getattr(message, "mentions", None) or ()
         bot_names = []
         if group:
@@ -543,8 +552,25 @@ class Lark:
             bot_names = bot_mention_names(mentions, self.bot_open_id())
             if not bot_names:
                 return
-        who = event.sender.sender_id
-        sender = who.open_id
+        if human:
+            who = event.sender.sender_id
+            sender = getattr(who, "open_id", None)
+            if (
+                not isinstance(sender, str)
+                or not sender
+                or LARK_APP_ID.fullmatch(sender)
+            ):
+                return
+            ids = (who.user_id, who.union_id)
+            event_id = data.header.event_id
+        else:
+            # The callback's open ID can differ from the app ID. Read the signed-in
+            # Lark record for the same message and chat before admitting the request.
+            sender = self.app_sender(message)
+            if sender not in allowed or sender == self.config.app_id:
+                return
+            ids = ()
+            event_id = "app-message:" + message.message_id
         inbound = normalize(
             message.message_type,
             message.content,
@@ -556,10 +582,10 @@ class Lark:
             data.header.tenant_key,
             sender,
             message.chat_id,
-            data.header.event_id,
+            event_id,
             message.message_id,
             without_names(inbound.text, bot_names) if group else inbound.text,
-            ids=(who.user_id, who.union_id),
+            ids=ids,
             kind=inbound.kind,
             attachments=[a.asdict() for a in inbound.attachments],
             reply_to=getattr(message, "parent_id", None)
@@ -572,8 +598,7 @@ class Lark:
             transport=self,
         )
 
-    def fetch_message(self, message_id):
-        """A message read back from Lark (a replied-to message, a forwarded thread)."""
+    def message_items(self, message_id):
         result = self.client.im.v1.message.get(
             GetMessageRequest.builder().message_id(message_id).build()
         )
@@ -583,6 +608,29 @@ class Lark:
         item = next((i for i in items if i.message_id == message_id), None)
         if item is None or item.deleted:
             raise RuntimeError("Lark message was missing or deleted")
+        return item, items
+
+    def app_sender(self, message):
+        try:
+            item, _ = self.message_items(message.message_id)
+        except RuntimeError:
+            emit("lark.app_sender_unverified", logging.WARNING)
+            return None
+        sender = item.sender
+        if (
+            item.chat_id == message.chat_id
+            and sender
+            and sender.sender_type in ("app", "bot")
+            and sender.id_type == "app_id"
+            and isinstance(sender.id, str)
+            and LARK_APP_ID.fullmatch(sender.id)
+        ):
+            return sender.id
+        return None
+
+    def fetch_message(self, message_id):
+        """A message read back from Lark (a replied-to message, a forwarded thread)."""
+        item, items = self.message_items(message_id)
         assistant = bool(item.sender and item.sender.sender_type == "app")
         # The conversation this message belongs to, by the rule `session_of` uses for an event.
         session = session_of(item)[0] or ""

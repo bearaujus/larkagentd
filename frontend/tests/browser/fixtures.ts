@@ -23,6 +23,8 @@ export const metrics: Metrics = {
   total_tokens: 400,
   turns: 2,
   llm_sessions: 2,
+  active_people: 2,
+  active_groups: 1,
   unavailable_sessions: 0,
   activity_calls: 3,
   query_calls: 2,
@@ -231,6 +233,7 @@ export type State = {
   conflictNextKnowledgeSave: boolean;
   failWrite: boolean;
   failUsage: boolean;
+  pricing?: "none" | "zero";
   empty: boolean;
   brokenImage: boolean;
   pollCount: number;
@@ -675,17 +678,50 @@ async function mock(context: BrowserContext, state: State) {
           period,
           statistics: {
             ...metrics,
+            estimated_cost_usd:
+              state.pricing === "none"
+                ? null
+                : state.pricing === "zero"
+                  ? "0"
+                  : "21.60915171000000",
+            priced_sessions:
+              state.pricing === "none"
+                ? 0
+                : state.pricing === "zero"
+                  ? 438
+                  : 350,
+            unpriced_sessions:
+              state.pricing === "none"
+                ? 438
+                : state.pricing === "zero"
+                  ? 0
+                  : 88,
             total_tokens: 1280400,
             llm_sessions: 438,
+            active_people: 74,
+            active_groups: 9,
             turns: 397,
             activity_calls: 892,
+            succeeded_calls: 826,
+            failed_calls: 29,
+            denied_calls: 22,
+            refused_calls: 13,
             query_calls: 614,
             unavailable_sessions: 4,
             incomplete_calls: 2,
             query_estimate_missing_calls: 9,
             available_query_estimated_input_gb: 128.4,
           },
-          monetary_costs_available: false,
+          model_spend:
+            state.pricing === "none"
+              ? []
+              : state.pricing === "zero"
+                ? [{ model: "free-model", estimated_cost_usd: "0" }]
+                : [
+                    { model: "model-a", estimated_cost_usd: "18.24495345" },
+                    { model: "model-b", estimated_cost_usd: "3.36419826" },
+                  ],
+          monetary_costs_available: state.pricing !== "none",
         });
       if (dataset === "export") {
         if (url.searchParams.has("limit") || url.searchParams.has("offset"))
@@ -730,6 +766,17 @@ async function mock(context: BrowserContext, state: State) {
             )
               .toISOString()
               .slice(0, 10),
+            estimated_cost_usd:
+              state.pricing === "none"
+                ? null
+                : state.pricing === "zero"
+                  ? "0"
+                  : i === 0
+                    ? null
+                    : i === 1
+                      ? "0"
+                      : (i * 0.028).toFixed(6),
+            priced_sessions: i === 0 ? 0 : 1,
             total_tokens: [
               16000, 23500, 19000, 37000, 31000, 43000, 38000, 56000, 49000,
             ][i % 9],

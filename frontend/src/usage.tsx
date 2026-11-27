@@ -1,14 +1,6 @@
-import { Fragment, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { CostOverview, Trend, estimatedUsd, Coverage } from "./cost-overview";
 import {
   ChevronDown,
   ChevronRight,
@@ -26,7 +18,6 @@ import {
   Notice,
   Panel,
   number,
-  shortNumber,
   time,
   useAction,
 } from "./components";
@@ -35,7 +26,6 @@ import { PageIntro } from "./policies";
 import type {
   Dataset,
   Filters,
-  Metrics,
   PageResult,
   Summary,
   Target,
@@ -82,10 +72,12 @@ export function ExportButton({
   );
 }
 export function FilterBar({
+  initialPeriod = "month",
   dataset,
   onApply,
 }: {
   dataset: Dataset | "summary";
+  initialPeriod?: "month" | "all";
   onApply: (value: Filters) => void;
 }) {
   const tools = useQuery({
@@ -93,7 +85,7 @@ export function FilterBar({
     queryFn: () => api<Tool[]>("/tools"),
     enabled: dataset === "queries",
   });
-  const [period, setPeriod] = useState("month");
+  const [period, setPeriod] = useState<string>(initialPeriod);
   const [draft, setDraft] = useState<Filters>({});
   const [invalid, setInvalid] = useState("");
   const set = (key: string, value: string) =>
@@ -176,10 +168,10 @@ export function FilterBar({
           type="button"
           className="text-button"
           onClick={() => {
-            setPeriod("month");
+            setPeriod(initialPeriod);
             setDraft({});
             setInvalid("");
-            onApply({});
+            onApply(initialPeriod === "all" ? { all_time: "true" } : {});
           }}
         >
           Reset
@@ -232,173 +224,6 @@ export function FilterBar({
       </details>
       {invalid && <Notice tone="error">{invalid}</Notice>}
     </form>
-  );
-}
-function estimatedUsd(value: string | null | undefined) {
-  if (value == null) return "Unavailable";
-  const amount = Number(value);
-  if (amount > 0 && amount < 0.000001) return "< $0.000001";
-  return new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 6,
-  }).format(amount);
-}
-function Coverage({ stats }: { stats: Metrics }) {
-  return (
-    <div className="coverage">
-      <div>
-        <span className="eyebrow">DATA COVERAGE</span>
-        <p>
-          Recorded usage only. Tracking failures and older query activity cannot
-          be reconstructed.
-        </p>
-        {stats.priced_sessions !== undefined && (
-          <p>
-            Estimated model spend:{" "}
-            <strong>{estimatedUsd(stats.estimated_cost_usd)}</strong>
-            {" · "}
-            {number(stats.priced_sessions)} priced of{" "}
-            {number(stats.llm_sessions)} model sessions
-          </p>
-        )}
-      </div>
-      <div>
-        <strong>{number(stats.unavailable_sessions)}</strong>
-        <span>sessions without provider usage</span>
-      </div>
-      <div>
-        <strong>{number(stats.query_estimate_missing_calls)}</strong>
-        <span>successful queries without estimates</span>
-      </div>
-      <div>
-        <strong>{number(stats.incomplete_calls)}</strong>
-        <span>calls without a terminal outcome</span>
-      </div>
-    </div>
-  );
-}
-function SummaryCards({ data }: { data: Summary }) {
-  const stats = data.statistics;
-  return (
-    <>
-      <div className="metrics-grid">
-        {[
-          ["Total tokens", stats.total_tokens, "Input, cache and output"],
-          [
-            "LLM sessions",
-            stats.llm_sessions,
-            `${number(stats.turns)} request turns`,
-          ],
-          [
-            "Tool activity",
-            stats.activity_calls,
-            `${number(stats.query_calls)} query / preview calls`,
-          ],
-          [
-            "Available query estimates",
-            stats.available_query_estimated_input_gb,
-            "GB · successful queries / previews only",
-          ],
-        ].map(([label, value, note]) => (
-          <div className="metric" key={String(label)}>
-            <span>{label}</span>
-            <strong title={number(value as number | null)}>
-              {shortNumber(value as number | null)}
-            </strong>
-            <small>{note}</small>
-          </div>
-        ))}
-      </div>
-      <Coverage stats={stats} />
-    </>
-  );
-}
-function Trend({ data }: { data: PageResult }) {
-  const [metric, setMetric] = useState<"total_tokens" | "activity_calls">(
-    "total_tokens",
-  );
-  return (
-    <div className="trend">
-      <div className="trend-heading">
-        <div>
-          <h3>Daily trend</h3>
-          <p>
-            UTC ·{" "}
-            {data.items.length
-              ? `Recorded days ${data.offset + 1}-${data.offset + data.items.length} of ${number(data.total)}`
-              : "No recorded days"}
-          </p>
-        </div>
-        <label className="sr-only" htmlFor="trend-metric">
-          Trend metric
-        </label>
-        <select
-          id="trend-metric"
-          value={metric}
-          onChange={(e) => setMetric(e.target.value as typeof metric)}
-        >
-          <option value="total_tokens">Tokens</option>
-          <option value="activity_calls">Tool calls</option>
-        </select>
-      </div>
-      {data.items.length ? (
-        <>
-          <div
-            className="chart"
-            role="group"
-            aria-label={`Daily ${metric === "total_tokens" ? "tokens" : "tool calls"}; exact values in the daily table`}
-          >
-            <ResponsiveContainer width="100%" height={240}>
-              <AreaChart
-                data={data.items}
-                margin={{ left: 0, right: 15, top: 12, bottom: 0 }}
-                accessibilityLayer
-              >
-                <CartesianGrid
-                  strokeDasharray="3 5"
-                  vertical={false}
-                  stroke="#e7eaf0"
-                />
-                <XAxis
-                  dataKey="date"
-                  tickFormatter={(value) => String(value).slice(5)}
-                  tickLine={false}
-                  axisLine={false}
-                  minTickGap={32}
-                  fontSize={12}
-                />
-                <YAxis
-                  tickFormatter={(value) => shortNumber(Number(value))}
-                  tickLine={false}
-                  axisLine={false}
-                  width={55}
-                  fontSize={12}
-                />
-                <Tooltip formatter={(value) => number(Number(value))} />
-                <Area
-                  type="linear"
-                  dataKey={metric}
-                  name={metric === "total_tokens" ? "Tokens" : "Tool calls"}
-                  stroke="#365fe5"
-                  fill="#edf1ff"
-                  strokeWidth={2}
-                  isAnimationActive={false}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-          <p className="chart-note">
-            The chart shows this page of recorded days. Missing days are not
-            proof of zero usage.
-          </p>
-        </>
-      ) : (
-        <Empty title="No daily activity">
-          Try a different period or remove filters.
-        </Empty>
-      )}
-    </div>
   );
 }
 export function Pagination({
@@ -563,6 +388,7 @@ export function UsageTable({
         : dataset === "daily"
           ? [
               "Day · UTC",
+              "Priced sessions",
               "Tokens",
               "Sessions",
               "Tool calls",
@@ -579,7 +405,9 @@ export function UsageTable({
                 "Scan estimate",
               ];
   const headers =
-    dataset === "queries" ? baseHeaders : [...baseHeaders, "Estimated USD"];
+    dataset === "queries"
+      ? baseHeaders
+      : [baseHeaders[0], "Estimated USD", ...baseHeaders.slice(1)];
   if (!data.items.length)
     return (
       <Empty title="No matching records">
@@ -615,6 +443,11 @@ export function UsageTable({
               row.date ||
               String(index);
             const open = expanded.has(key);
+            const costCell = (
+              <td className="numeric strong">
+                {estimatedUsd(row.estimated_cost_usd)}
+              </td>
+            );
             return (
               <Fragment key={key}>
                 <tr>
@@ -642,6 +475,7 @@ export function UsageTable({
                   {dataset === "users" && (
                     <>
                       <td>{identity(row)}</td>
+                      {costCell}
                       <td className="numeric strong">
                         {number(row.total_tokens)}
                       </td>
@@ -656,6 +490,7 @@ export function UsageTable({
                   {dataset === "models" && (
                     <>
                       <td className="strong">{row.model || "Unknown model"}</td>
+                      {costCell}
                       <td className="numeric strong">
                         {number(row.total_tokens)}
                       </td>
@@ -669,6 +504,14 @@ export function UsageTable({
                   {dataset === "daily" && (
                     <>
                       <td>{row.date}</td>
+                      {costCell}
+                      <td className="numeric">
+                        {row.priced_sessions == null
+                          ? "Unavailable"
+                          : number(row.priced_sessions) +
+                            " of " +
+                            number(row.llm_sessions)}
+                      </td>
                       <td className="numeric strong">
                         {number(row.total_tokens)}
                       </td>
@@ -687,6 +530,7 @@ export function UsageTable({
                         </span>
                         {identity(row)}
                       </td>
+                      {costCell}
                       <td>{row.model || "Unknown model"}</td>
                       <td className="numeric strong">
                         {row.source === "unavailable"
@@ -703,11 +547,6 @@ export function UsageTable({
                         </Badge>
                       </td>
                     </>
-                  )}
-                  {dataset !== "queries" && (
-                    <td className="numeric">
-                      {estimatedUsd(row.estimated_cost_usd)}
-                    </td>
                   )}
                   {dataset === "queries" && (
                     <>
@@ -835,22 +674,62 @@ export function Usage({ overview = false }: { overview?: boolean }) {
     enabled: overview,
   });
   const period = query.data?.period ?? summary.data?.period;
+  const filtersButton = useRef<HTMLButtonElement>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filterCount = Object.entries(filters).filter(
+    ([k, v]) => v && !["from", "to", "all_time"].includes(k),
+  ).length;
   return (
     <>
       <PageIntro
         title={overview ? "Overview" : "Usage"}
         description={
           overview
-            ? "A clear view of assistant activity and access."
+            ? "Workspace model costs and assistant activity."
             : "Recorded usage across people, models and data connectors. Statistics only."
         }
         action={
-          <ExportButton
-            dataset={overview ? "all" : dataset}
-            filters={filters}
-          />
+          <div className="report-actions">
+            {overview && (
+              <button
+                aria-expanded={filtersOpen}
+                ref={filtersButton}
+                aria-controls="overview-filters"
+                onClick={() => setFiltersOpen(!filtersOpen)}
+              >
+                <Filter size={15} />
+                Filters{filterCount ? " (" + filterCount + ")" : ""}
+              </button>
+            )}
+            <ExportButton
+              dataset={overview ? "all" : dataset}
+              filters={filters}
+            />
+          </div>
         }
       />
+      {overview && (
+        <div id="overview-filters" hidden={!filtersOpen}>
+          <FilterBar
+            initialPeriod="month"
+            dataset="summary"
+            onApply={(value) => {
+              setFilters(value);
+              setPage((old) => ({ ...old, offset: 0 }));
+              setFiltersOpen(false);
+              filtersButton.current?.focus();
+            }}
+          />
+        </div>
+      )}
+      {overview && (
+        <CostOverview
+          filters={filters}
+          daily={query}
+          summary={summary}
+          turnPage={(offset) => setPage((old) => ({ ...old, offset }))}
+        />
+      )}
       {!overview && (
         <nav className="tabs" aria-label="Usage reports">
           {datasets.map(([value, label]) => (
@@ -867,13 +746,16 @@ export function Usage({ overview = false }: { overview?: boolean }) {
           ))}
         </nav>
       )}
-      <FilterBar
-        dataset={overview ? "summary" : dataset}
-        onApply={(value) => {
-          setFilters(value);
-          setPage((old) => ({ ...old, offset: 0 }));
-        }}
-      />
+      {!overview && (
+        <FilterBar
+          initialPeriod="month"
+          dataset={dataset}
+          onApply={(value) => {
+            setFilters(value);
+            setPage((old) => ({ ...old, offset: 0 }));
+          }}
+        />
+      )}
       <div className="report-context">
         <span>
           {period
@@ -892,18 +774,11 @@ export function Usage({ overview = false }: { overview?: boolean }) {
           Refresh
         </button>
       </div>
-      {overview &&
-        (summary.isPending ? (
-          <Loading label="Loading totals" />
-        ) : summary.isError ? (
-          <Failure error={summary.error} retry={() => void summary.refetch()} />
-        ) : (
-          <SummaryCards data={summary.data} />
-        ))}
+      {overview && summary.data && <Coverage stats={summary.data.statistics} />}
       <Panel
         title={
           overview
-            ? "Activity over time"
+            ? "Daily breakdown"
             : datasets.find(([value]) => value === dataset)?.[1]
         }
         description={
@@ -920,7 +795,7 @@ export function Usage({ overview = false }: { overview?: boolean }) {
           <Failure error={query.error} retry={() => void query.refetch()} />
         ) : (
           <>
-            {dataset === "daily" && <Trend data={query.data} />}
+            {!overview && dataset === "daily" && <Trend data={query.data} />}
             <UsageTable
               key={`${dataset}:${queryString}`}
               data={query.data}
@@ -930,11 +805,13 @@ export function Usage({ overview = false }: { overview?: boolean }) {
           </>
         )}
       </Panel>
-      <p className="footnote">
-        Usage may be incomplete. Unavailable counts do not mean free usage. Scan
-        estimates cover available successful query/preview estimates only;
-        historical query activity was not backfilled.
-      </p>
+      {!overview && (
+        <p className="footnote">
+          Usage may be incomplete. Unavailable counts do not mean free usage.
+          Scan estimates cover available successful query/preview estimates
+          only; historical query activity was not backfilled.
+        </p>
+      )}
     </>
   );
 }

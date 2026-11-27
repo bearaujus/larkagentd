@@ -595,12 +595,26 @@ test("daily pagination identifies partial history and uses server summary", asyn
   state,
 }) => {
   await page.goto("/dashboard/");
+  await expect(
+    page.getByRole("heading", { name: "Organization-wide daily usage" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Trend metric")).toHaveValue(
+    "estimated_cost_usd",
+  );
+  const chart = page.getByRole("group", { name: /Daily Estimated spend/ });
+  await expect(
+    chart.locator(".recharts-bar-rectangle path").first(),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("columnheader", { name: "Priced sessions" }),
+  ).toBeVisible();
   await expect(page.getByText("1.3M", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Filters", exact: true }).click();
   await page.getByLabel("Period · UTC").selectOption("all");
   await page.getByRole("button", { name: "Apply filters" }).click();
-  await expect(page.getByText("UTC · Recorded days 1-50 of 60")).toBeVisible();
-  await page.getByRole("button", { name: "Next", exact: true }).click();
-  await expect(page.getByText("UTC · Recorded days 51-60 of 60")).toBeVisible();
+  await expect(page.getByText("Recorded days 1-50 of 60")).toBeVisible();
+  await page.getByRole("button", { name: "Later chart days" }).click();
+  await expect(page.getByText("Recorded days 51-60 of 60")).toBeVisible();
   expect(state.requests.some((r) => r.path === "/usage/summary")).toBe(true);
 });
 test("keyboard controls, mobile layout and accessibility", async ({
@@ -1431,4 +1445,225 @@ test("group facts show the cited message and require confirmation before removal
     .getByRole("button", { name: "Stop using this fact" })
     .click();
   await expect(page.getByText("No active facts on this page.")).toBeVisible();
+});
+
+for (const group of [false, true]) {
+  test(`attach and refresh a Lark source in ${group ? "group" : "workspace"} knowledge`, async ({
+    page,
+    state,
+  }) => {
+    state.loggedIn = true;
+    const endpoint =
+      (group ? "/groups/oc_platform/knowledge" : "/knowledge") + "/sources";
+    const url =
+      "https://example.larksuite.com" +
+      (group ? "/wiki/sampleWikiNode" : "/docs/sampleClassicDoc");
+    let saved = false;
+    let refreshed = false;
+    await page.route("**/v1/dashboard" + endpoint, async (route) => {
+      const method = route.request().method();
+      if (method === "POST") {
+        expect(route.request().postDataJSON()).toEqual({
+          name: group ? "Demo Handbook: Working in the Office" : "",
+          kind: group ? "lark_wiki" : "lark_doc",
+          url,
+        });
+        saved = true;
+      }
+      if (method === "PATCH") {
+        expect(route.request().postDataJSON()).toEqual({
+          id: "example",
+          refresh: true,
+        });
+        refreshed = true;
+      }
+      return route.fulfill({
+        json:
+          method === "GET"
+            ? {
+                mcp_servers: [],
+                sources: saved
+                  ? [
+                      {
+                        id: "example",
+                        name: "Demo Handbook: Working in the Office",
+                        kind: group ? "lark_wiki" : "lark_doc",
+                        url,
+                        markdown: "",
+                        indexed: 2,
+                        skipped: 1,
+                        status: "ready",
+                      },
+                    ]
+                  : [],
+              }
+            : { id: "example" },
+      });
+    });
+    await page.goto("/dashboard/");
+    await page.getByRole("link", { name: "Knowledge", exact: true }).click();
+    if (group)
+      await page.getByLabel("View sources for").selectOption("oc_platform");
+    await page.getByRole("button", { name: "Add source" }).click();
+    const dialog = page.getByRole("dialog");
+    const input = dialog.getByRole("textbox", {
+      name: "Lark link",
+      exact: true,
+    });
+    await expect(input).toBeFocused();
+    await input.fill("https://example.org/unsupported");
+    await expect(input).toHaveAttribute("aria-invalid", "true");
+    await expect(
+      dialog.getByRole("button", { name: "Add source" }),
+    ).toBeDisabled();
+    if (group)
+      await dialog
+        .getByLabel("Custom name (optional)")
+        .fill("Demo Handbook: Working in the Office");
+    if (group) {
+      await input.fill("https://example.larksuite.com/wiki/settings/123#more");
+      await expect(
+        page.getByText("All Docs in this wiki space."),
+      ).toBeVisible();
+    }
+    await input.fill(url);
+    await expect(
+      page.getByText(
+        group ? "This wiki page and its children." : "This document only.",
+      ),
+    ).toBeVisible();
+    await dialog.getByRole("button", { name: "Add source" }).click();
+    await expect(
+      page.getByRole("link", { name: "Demo Handbook: Working in the Office" }),
+    ).toHaveAttribute("href", url);
+    await expect(
+      page.getByText("2 searchable pages · 1 skipped"),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Refresh now" }).click();
+    await expect(page.getByText("Refresh queued.")).toBeVisible();
+    expect(refreshed).toBe(true);
+    if (group) {
+      await expect(page.getByLabel("View sources for")).toHaveValue(
+        "oc_platform",
+      );
+      await expect(page).toHaveURL(/knowledge\?group=oc_platform$/);
+      await page.getByLabel("View sources for").selectOption("");
+      await expect(
+        page.getByRole("heading", { name: "Workspace sources" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("link", {
+          name: "Demo Handbook: Working in the Office",
+        }),
+      ).toHaveCount(0);
+    }
+  });
+}
+
+test("a scoped admin sees the group and can correct a source save error", async ({
+  page,
+  state,
+}) => {
+  state.loggedIn = true;
+  let submits = 0;
+  await page.route("**/v1/dashboard/auth/session", (r) =>
+    r.fulfill({
+      json: {
+        role: "group_admin",
+        group_id: "oc_platform",
+        expires_at: Date.now() / 1000 + 600,
+      },
+    }),
+  );
+  await page.route("**/knowledge/learned", (r) =>
+    r.fulfill({
+      json: {
+        records: [],
+        next: null,
+        state: "enabled",
+        learning: true,
+        group_name: "Platform Engineering",
+      },
+    }),
+  );
+  await page.route("**/groups/oc_platform/knowledge/sources", (r) => {
+    if (r.request().method() === "GET")
+      return r.fulfill({ json: { sources: [], mcp_servers: [] } });
+    submits++;
+    return submits === 1
+      ? r.fulfill({ status: 409, json: { error: "source_name_in_use" } })
+      : r.fulfill({ json: { id: "second-source" } });
+  });
+  await page.goto("/dashboard/");
+  await expect(
+    page.getByText("Available in Platform Engineering only.", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByLabel("View sources for")).toHaveCount(0);
+  const add = page.getByRole("button", { name: "Add source", exact: true });
+  await add.click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Source type").selectOption("markdown");
+  await dialog
+    .getByRole("textbox", { name: "Markdown", exact: true })
+    .fill("Office schedule.");
+  await dialog.getByLabel("Source name").fill("Office");
+  await dialog.getByRole("button", { name: "Add source" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("already exists");
+  await expect(
+    dialog.getByRole("textbox", { name: "Markdown", exact: true }),
+  ).toHaveValue("Office schedule.");
+  await dialog.getByLabel("Source name").fill("Office: Pilot");
+  await dialog.getByRole("button", { name: "Add source" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(add).toBeFocused();
+});
+
+test("overview shows adoption, tool success, and daily spend", async ({
+  page,
+  state,
+}) => {
+  state.loggedIn = true;
+  await page.goto("/dashboard/");
+  const board = page.getByRole("region", { name: "Cost overview" });
+  await expect(board.getByText("Active people")).toBeVisible();
+  await expect(board.getByText("Across 9 active groups")).toBeVisible();
+  await expect(
+    board.getByText("93% of finished calls succeeded"),
+  ).toBeVisible();
+  const bars = page.getByRole("group", { name: /Daily Estimated spend/ });
+  await expect(
+    bars.locator(".recharts-bar-rectangle path").first(),
+  ).toBeVisible();
+});
+
+test("the overview distinguishes zero cost in the expanded report", async ({
+  page,
+  state,
+}) => {
+  state.pricing = "zero";
+  await page.goto("/dashboard/");
+  const board = page.getByRole("region", { name: "Cost overview" });
+  await expect(board.locator(".spend-kpi dd").first()).toHaveText("$0.00");
+  await expect(board.getByText("438 of 438 sessions priced")).toBeVisible();
+  await expect(page.getByLabel("Trend metric")).toHaveValue(
+    "estimated_cost_usd",
+  );
+  await expect(board).not.toContainText("NaN");
+  if (await page.evaluate(() => document.fullscreenEnabled)) {
+    await board.getByRole("button", { name: "Expand report" }).click();
+    await expect(
+      board.getByRole("button", { name: "Exit expanded report" }),
+    ).toBeVisible();
+    await expect(board.getByText("Active people")).toBeVisible();
+    await board.getByRole("button", { name: "Exit expanded report" }).click();
+    await expect(
+      board.getByRole("button", { name: "Expand report" }),
+    ).toBeVisible();
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
 });
