@@ -4,6 +4,22 @@
 
 Mention the assistant in a registered Lark group to recall a decision, read a shared document, or create a Doc, Sheet or Slides deck. It replies in the original thread. The dashboard manages group access, sources, models and usage.
 
+## In Lark
+
+Follow tool activity in one updating card. The final reply can include the original message as evidence and an expandable token breakdown.
+
+![Synthetic preview of an activity card and a final reply with its source message and token usage](docs/screenshots/chat-cards.png)
+
+## Dashboard
+
+See daily spend, adoption and tool outcomes on **Overview**. In **Knowledge**, review the original messages behind facts saved by the assistant, see when each fact expires, and retire it when it is no longer useful.
+
+![Overview dashboard with synthetic spend, adoption, tokens and tool outcomes](docs/screenshots/overview.png)
+
+![Group Knowledge with a curated source and a saved decision showing its evidence and expiry](docs/screenshots/group-knowledge.png)
+
+See [group access and governance screenshots](docs/dashboard.md) for more of the dashboard.
+
 ## Run locally
 
 1. Install Docker with Compose and run `make env`.

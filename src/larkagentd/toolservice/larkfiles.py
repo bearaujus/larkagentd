@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from ..core import group_actions
 from ..lark.links import TOKEN, parse_link
 from .historyfiles import verify_history_file
-from .larkcli import LarkError
+from .larkcli import LarkError, _column_label, _column_number
 
 DRIVE_TYPES = {
     "docx": "docx",
@@ -26,6 +26,7 @@ IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,128}")
 SHEET_RANGE = re.compile(
     r"(?P<col>[A-Z]{1,3})(?P<first>[1-9][0-9]{0,4}):(?P=col)(?P<last>[1-9][0-9]{0,4})"
 )
+CELL = re.compile(r"([A-Z]{1,3})([1-9][0-9]{0,4})")
 SML = "https://www.larkoffice.com/sml/2.0"
 ET.register_namespace("", SML)
 
@@ -90,6 +91,42 @@ def _cells(raw):
         return json.dumps(rows, allow_nan=False)
     except ValueError:
         raise LarkError("bad_arguments") from None
+
+
+def _cell_rectangle(start, rows):
+    """The value API requires the full rectangle even when writing one cell."""
+    match = CELL.fullmatch(start)
+    if not match:
+        raise LarkError("bad_arguments")
+    end = _column_label(_column_number(match[1]) + len(rows[0]) - 1)
+    row = int(match[2]) + len(rows) - 1
+    if len(end) > 3 or row > 99999:
+        raise LarkError("bad_arguments")
+    return f"{start}:{end}{row}"
+
+
+def _matches_cells(data, expected):
+    if not isinstance(data, list) or len(data) > len(expected):
+        return False
+    for index, row in enumerate(expected):
+        actual = data[index] if index < len(data) else []
+        if not isinstance(actual, list) or len(actual) > len(row):
+            return False
+        for col, value in enumerate(row):
+            got = actual[col] if col < len(actual) else None
+            if value in (None, "") and got in (None, ""):
+                continue
+            if value != got or isinstance(value, bool) != isinstance(got, bool):
+                return False
+    return True
+
+
+def _paragraphs(root):
+    return {
+        " ".join("".join(node.itertext()).split())
+        for node in root.iter()
+        if node.tag.rsplit("}", 1)[-1] == "p"
+    }
 
 
 def _slide_chart(data, ns, spec):
@@ -400,10 +437,14 @@ class LarkFiles:
             return self._cli(("slides", "+xml-get"), "--presentation", link.token)
         if link.kind == "sheets":
             if range_:
-                return self.reader.sheet(link.url, range=f"{_id(sheet_id)}!{range_}")
-            return self._cli(
-                ("sheets", "+workbook-info"), "--spreadsheet-token", link.token
-            )
+                return self.reader.sheet(link.url, range=range_, tab=sheet_id)
+            info = self.read_workbook(link)
+            if sheet_id is not None or len(info.get("sheets") or ()) == 1:
+                return {
+                    **info,
+                    "preview": self.reader.sheet(link.url, workbook=info, tab=sheet_id),
+                }
+            return info
         if link.kind == "docx":
             return self._cli(
                 ("docs", "+fetch"),
@@ -565,9 +606,12 @@ class LarkFiles:
                 )
             stage = "create_readback"
             if kind == "docx":
-                self._cli(("docs", "+fetch"), "--doc", token, "--scope", "outline")
+                if not self.doc_text(link).strip():
+                    raise LarkError("artifact_unverified")
+            elif kind == "sheets":
+                self.verify_cells(link, tab, "A1", content)
             elif kind == "slides":
-                self._cli(("slides", "+xml-get"), "--presentation", token)
+                self.verify_slides(link, dict(zip(slide_ids, slides)))
             stage = "create_publish"
             result = self.publish(ctx, link)
         except LarkError as exc:
@@ -582,15 +626,64 @@ class LarkFiles:
 
     def set_cells(self, link, sheet_id, start, content):
         # PUT values on the native Sheets surface. The first cell and matrix are validated.
-        target = f"{sheet_id}!{start}"
+        rows = _json(content)
+        target = f"{sheet_id}!{_cell_rectangle(start, rows)}"
         return self._api(
             "PUT",
             f"sheets/v2/spreadsheets/{link.token}/values",
             {},
             {
-                "valueRange": {"range": target, "values": _json(content)},
+                "valueRange": {"range": target, "values": rows},
             },
         )
+
+    def verify_cells(self, link, sheet_id, start, content):
+        rows = _json(content)
+        target = f"{sheet_id}!{_cell_rectangle(start, rows)}"
+        values = self._api(
+            "GET",
+            f"sheets/v2/spreadsheets/{link.token}/values/{target}",
+            {},
+        ).get("valueRange")
+        if not isinstance(values, dict) or not _matches_cells(
+            values.get("values", []), rows
+        ):
+            raise LarkError("write_outcome_unknown")
+
+    def doc_text(self, link):
+        value = self._api("GET", f"docx/v1/documents/{link.token}/raw_content", {}).get(
+            "content"
+        )
+        if not isinstance(value, str):
+            raise LarkError("lark_unavailable")
+        return value
+
+    def verify_slides(self, link, expected):
+        response = self._cli(("slides", "+xml-get"), "--presentation", link.token)
+        presentation = response.get("xml_presentation")
+        content = (
+            presentation.get("content")
+            if isinstance(presentation, dict)
+            else presentation
+        )
+        try:
+            root = ET.fromstring(content)
+        except (ET.ParseError, TypeError, ValueError):
+            raise LarkError("write_outcome_unknown") from None
+        pages = {
+            node.get("id"): node
+            for node in root.iter()
+            if node.tag.rsplit("}", 1)[-1] == "slide"
+        }
+        for page_id, xml in expected.items():
+            page = pages.get(page_id)
+            requested = ET.fromstring(xml)
+            if page is None or not _paragraphs(requested) <= _paragraphs(page):
+                raise LarkError("write_outcome_unknown")
+            if requested.find(f".//{{{SML}}}chart") is not None and not any(
+                node.tag.rsplit("}", 1)[-1] == "chart" for node in page.iter()
+            ):
+                raise LarkError("write_outcome_unknown")
 
     def edit(self, ctx, link, args, *, confirmed=False):
         bot_edit = self.require(ctx, link, write=True, allow_bot_edit=True)
@@ -611,7 +704,7 @@ class LarkFiles:
         elif link.kind == "sheets" and action == "set":
             tab = _id(args.get("sheet_id"))
             start = args.get("range") or ""
-            if not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]{0,4}", start):
+            if not CELL.fullmatch(start):
                 raise LarkError("bad_arguments")
             content = _cells(content)
             command = None
@@ -620,14 +713,16 @@ class LarkFiles:
                 "slides",
                 "+add-slide" if action == "append" else "+update-slide",
             )
+            xml = _slide_xml(_json(content))
             flags = [
                 "--presentation",
                 link.token,
-                "--slide",
-                _slide_xml(_json(content)),
             ]
             if action == "replace":
-                flags += ["--slide-id", _id(args.get("slide_id"))]
+                slide_id = _id(args.get("slide_id"))
+                flags += ["--slide-id", slide_id, "--content", xml]
+            else:
+                flags += ["--slide", xml]
         else:
             raise LarkError("unsupported_edit")
         access = {"access_basis": "bot_edit"} if bot_edit else {}
@@ -637,6 +732,12 @@ class LarkFiles:
             if not ctx.request_action("file_edit", {**args, "url": link.url}, label):
                 raise LarkError("confirmation_already_pending")
             return {"confirmation_requested": True, **access}
+        before = None
+        if link.kind == "docx":
+            try:
+                before = self.doc_text(link)
+            except LarkError as exc:
+                raise exc.during("edit_preflight", "edit") from None
         receipt, previous = group_actions.reserve(
             self.store, self.vault, ctx.turn, "edit", args
         )
@@ -654,14 +755,23 @@ class LarkFiles:
         except LarkError as exc:
             raise exc.during("write_request", "edit") from None
         try:
-            if link.kind in ("docx", "slides"):
-                self.read(ctx, link)
+            self.require(ctx, link)
+            if link.kind == "docx":
+                if self.doc_text(link) == before:
+                    raise LarkError("write_no_change")
+            elif link.kind == "sheets":
+                self.verify_cells(link, tab, start, content)
             else:
-                self.require(ctx, link)
-                self.read_workbook(link)
+                if action == "append":
+                    slide_id = _id(response.get("slide_id"))
+                self.verify_slides(link, {slide_id: xml})
         except LarkError as exc:
             raise exc.during(
-                "write_readback", "edit", code="write_outcome_unknown"
+                "write_readback",
+                "edit",
+                code="write_no_change"
+                if str(exc) == "write_no_change"
+                else "write_outcome_unknown",
             ) from None
         result = {
             "url": link.url,

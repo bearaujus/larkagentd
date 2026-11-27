@@ -57,6 +57,8 @@ type Fact = {
   activation: string;
   content: string | null;
   status: string;
+  saved_at?: string | null;
+  expires_at?: string | null;
   sources: {
     source_id: string;
     url: string | null;
@@ -92,11 +94,16 @@ export function useLearnedPage(endpoint: string, cursor = "") {
 function LearnedFacts({
   endpoint,
   groupId,
+  groupName,
+  settingsPath,
 }: {
   endpoint: string;
   groupId: string;
+  groupName?: string;
+  settingsPath?: string;
 }) {
   const [pages, setPages] = useState([""]);
+  const [notice, setNotice] = useState("");
   const cursor = pages[pages.length - 1];
   const learned = useLearnedPage(endpoint, cursor);
   if (learned.isPending) return <Loading label="Checking group sources" />;
@@ -105,40 +112,73 @@ function LearnedFacts({
       <Failure error={learned.error} retry={() => void learned.refetch()} />
     );
   const page = learned.data;
+  const status = page.learning
+    ? "Learning on"
+    : page.state === "paused"
+      ? "Learning paused"
+      : page.state === "purging"
+        ? "Clearing saved facts"
+        : "Learning off";
   return (
     <section
       className="panel knowledge-panel"
-      aria-label="Learned from conversations"
+      aria-labelledby="saved-facts-heading"
     >
-      <h2>Learned from conversations</h2>
-      <p>
-        <strong>{page.group_name || groupId}</strong> ·{" "}
-        {page.learning
-          ? "Learning enabled"
-          : page.state === "paused"
-            ? "Learning paused"
-            : "Learning disabled"}
-      </p>
-      {page.learning && (
-        <p className="muted">
-          The assistant can save useful facts from this group after each turn.{" "}
-          Workspace admins manage learning settings.
-        </p>
+      <div className="panel-heading">
+        <div>
+          <h2 id="saved-facts-heading">Saved from conversations</h2>
+          <p>
+            For {page.group_name || groupName || groupId}. The assistant can
+            save useful facts after a reply and checks the original message
+            before using them.
+          </p>
+        </div>
+        <span className="fact-status" data-active={page.learning}>
+          {status}
+        </span>
+      </div>
+      {settingsPath && (
+        <Link to={settingsPath}>Learning settings and corrections</Link>
       )}
       {page.learning && !page.records.length && (
-        <p>No active facts on this page.</p>
+        <div className="fact-empty">
+          <strong>
+            {pages.length === 1
+              ? "No saved facts yet"
+              : "No saved facts on this page"}
+          </strong>
+          <p>
+            The assistant can save a useful fact from a person’s message after
+            replying. Add a group source below when you want a reference to stay
+            available.
+          </p>
+        </div>
+      )}
+      {!page.learning && (
+        <p className="fact-empty muted">
+          Saved facts are unavailable to the assistant while learning is
+          inactive.
+        </p>
       )}
       <ul className="fact-list">
         {page.records.map((fact) => (
           <li key={fact.id}>
             {fact.status === "verified" ? (
               <>
-                <strong>{fact.content}</strong>
-                <small>
+                <small className="fact-meta">
                   {fact.category.replaceAll("_", " ")} ·{" "}
                   {fact.activation === "reviewed"
-                    ? "Approved by a reviewer"
-                    : "Activated after a source check"}
+                    ? "Reviewed"
+                    : "Saved automatically"}
+                </small>
+                <strong>{fact.content}</strong>
+                <small className="fact-dates">
+                  {fact.saved_at && (
+                    <span>Saved {time(fact.saved_at)} UTC</span>
+                  )}
+                  {fact.expires_at && (
+                    <span>Available until {time(fact.expires_at)} UTC</span>
+                  )}
                 </small>
                 {fact.sources.map((source) => (
                   <blockquote key={source.source_id}>
@@ -150,34 +190,46 @@ function LearnedFacts({
                     ) : (
                       <span>Source message · link unavailable</span>
                     )}{" "}
-                    · {time(source.time)}
+                    · {time(source.time)} UTC
                   </blockquote>
                 ))}
               </>
             ) : (
-              <p>
-                {fact.status === "temporarily_unavailable"
-                  ? "Lark is temporarily unavailable. Refresh to check this fact."
-                  : "The source changed or is no longer accessible. This fact is hidden."}
-              </p>
+              <div className="fact-unavailable">
+                <strong>Source check unavailable</strong>
+                <p>
+                  {fact.status === "temporarily_unavailable"
+                    ? "Lark did not respond to the source check. Refresh to try again."
+                    : "The original message changed or access was lost. The assistant cannot use this fact."}
+                </p>
+              </div>
             )}
             <Confirm
-              label="Stop using this fact"
-              title="Stop using this fact?"
+              label="Retire fact"
+              title="Retire this saved fact?"
               onConfirm={async () => {
                 await write(
                   endpoint + "/learned/" + fact.id + "/retire",
                   "POST",
                 );
-                await learned.refetch();
+                const refreshed = await learned.refetch();
+                if (!refreshed.data?.records.length && pages.length > 1)
+                  setPages(pages.slice(0, -1));
+                setNotice("Fact retired.");
               }}
             >
-              The assistant will stop citing this fact in the group. The
-              original Lark messages stay in the conversation.
+              The assistant will stop using this saved fact. The original Lark
+              message stays in the chat and may still appear in conversation
+              searches.
             </Confirm>
           </li>
         ))}
       </ul>
+      {notice && (
+        <p role="status" className="source-notice">
+          {notice}
+        </p>
+      )}
       <div className="knowledge-actions">
         <button
           className="button"
@@ -224,11 +276,12 @@ export function WorkspaceKnowledge() {
         <div>
           <h1>Knowledge</h1>
           <p>
-            Manage the sources the assistant can cite in group conversations.
+            Manage shared references for all registered groups. Select a group
+            to see its own sources and facts saved from conversations.
           </p>
         </div>
         <label>
-          View sources for
+          View knowledge for
           <select
             value={groupId ?? ""}
             onChange={(e) =>
@@ -256,6 +309,7 @@ export function WorkspaceKnowledge() {
         <KnowledgeLibrary
           key={groupId}
           groupId={groupId}
+          settingsPath={`/groups/${encodeURIComponent(groupId)}?view=knowledge`}
           groupName={
             directory.get({ kind: "group", key: groupId })?.name || groupId
           }
@@ -506,9 +560,11 @@ function SourceEditor({
 export function KnowledgeLibrary({
   groupId,
   groupName,
+  settingsPath,
 }: {
   groupId?: string;
   groupName?: string;
+  settingsPath?: string;
 }) {
   const endpoint = groupId
     ? "/groups/" + encodeURIComponent(groupId) + "/knowledge"
@@ -531,6 +587,14 @@ export function KnowledgeLibrary({
     : "Available across registered groups.";
   return (
     <>
+      {groupId && (
+        <LearnedFacts
+          groupId={groupId}
+          groupName={groupName}
+          endpoint={endpoint}
+          settingsPath={settingsPath}
+        />
+      )}
       <section
         className="panel source-library"
         aria-label={groupId ? "Group sources" : "Workspace sources"}
@@ -538,7 +602,10 @@ export function KnowledgeLibrary({
         <div className="panel-heading">
           <div>
             <h2>{groupId ? "Group sources" : "Workspace sources"}</h2>
-            <p>{audience} Lark sharing permissions apply.</p>
+            <p>
+              {audience} Add references here for the assistant to use. Lark
+              sharing permissions apply.
+            </p>
           </div>
           {listing.data && (
             <button
@@ -560,10 +627,8 @@ export function KnowledgeLibrary({
           (!listing.data.sources.length ? (
             <div className="source-empty">
               <Library size={26} aria-hidden="true" />
-              <h3>No sources yet</h3>
-              <p>
-                Add a Lark Wiki, a Doc or Markdown for the assistant to use.
-              </p>
+              <h3>No sources added yet</h3>
+              <p>Add a Lark Wiki, a Doc, or Markdown as a reference.</p>
             </div>
           ) : (
             <ul className="source-list">
@@ -674,7 +739,6 @@ export function KnowledgeLibrary({
           }}
         />
       )}
-      {groupId && <LearnedFacts groupId={groupId} endpoint={endpoint} />}
     </>
   );
 }

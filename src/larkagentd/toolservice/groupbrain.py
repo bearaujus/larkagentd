@@ -72,7 +72,7 @@ def run(ctx, method, arguments):
     if runtime is None:
         return {"status": "disabled", "reason": "global_disabled"}
     generation = runtime.effective(group_key).generation
-    recall = Recall(runtime)
+    recall = Recall(runtime, getattr(ctx, "observe_source", None))
     found = {}
     if method == "get_discussion":
         result = recall.get_discussion(

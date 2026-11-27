@@ -54,11 +54,15 @@ def first_sentence(text, limit=200):
     return head if len(head) <= limit else head[: limit - 1].rstrip() + "\u2026"
 
 
+def capability(tool):
+    return CAPABILITIES.get(tool.name, (tool.kind, tool.risk))
+
+
 def catalog(tools):
     """The registry rows the code implies, from the tools it has and the ones it plans."""
     entries = []
     for name, tool in tools.items():
-        kind, risk = CAPABILITIES.get(name, (tool.kind, tool.risk))
+        kind, risk = capability(tool)
         entries.append(
             dict(
                 name=name,

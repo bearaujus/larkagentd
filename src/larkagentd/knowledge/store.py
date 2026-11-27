@@ -18,6 +18,7 @@ from .tables import (
     gb_index_entries,
     gb_jobs,
     gb_memory,
+    gb_memory_revisions,
     gb_sync_state,
     group_knowledge_settings,
 )
@@ -603,10 +604,19 @@ class KnowledgeStore:
         ).scalar_one()
         memories = conn.execute(
             select(func.count())
-            .select_from(gb_memory)
+            .select_from(
+                gb_memory.join(
+                    gb_memory_revisions,
+                    (gb_memory_revisions.c.group_key == gb_memory.c.group_key)
+                    & (gb_memory_revisions.c.memory_id == gb_memory.c.id)
+                    & (gb_memory_revisions.c.revision == gb_memory.c.current_revision),
+                )
+            )
             .where(
                 gb_memory.c.group_key == group_key,
                 gb_memory.c.state == "active",
+                gb_memory_revisions.c.status == "active",
+                gb_memory_revisions.c.expires_at > func.now(),
             )
         ).scalar_one()
         documents = conn.execute(
@@ -620,10 +630,10 @@ class KnowledgeStore:
         ).scalar_one()
         pending = conn.execute(
             select(func.count())
-            .select_from(gb_memory)
+            .select_from(gb_memory_revisions)
             .where(
-                gb_memory.c.group_key == group_key,
-                gb_memory.c.state == "pending",
+                gb_memory_revisions.c.group_key == group_key,
+                gb_memory_revisions.c.status == "pending",
             )
         ).scalar_one()
         return {

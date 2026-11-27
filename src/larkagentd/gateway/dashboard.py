@@ -11,7 +11,7 @@ from sqlalchemy import delete
 from ..core.diagnostics import actor_ref, emit
 from ..core.store import dashboard_sessions
 from .access import SESSION_TTL, AccessError, public_origin, token_hash
-from .learned_page import learned_page
+from .learned_page import correction_review, learned_page
 from .reporting import Reporting
 from .static_assets import ROOT, serve
 
@@ -230,6 +230,31 @@ def make_handler(
                                 directory.transport if directory else None,
                                 verify_group_admin,
                             ),
+                        )
+                        return
+                    if (
+                        parts[0] == "groups"
+                        and parts[2:4] == ["knowledge", "candidates"]
+                        and prior["role"] == "admin"
+                        and (
+                            (len(parts) == 4 and self.command == "GET")
+                            or (
+                                len(parts) == 6
+                                and parts[-1] == "approve"
+                                and self.command == "POST"
+                            )
+                        )
+                    ):
+                        self.respond(
+                            *correction_review(
+                                access,
+                                token,
+                                parts,
+                                self.command,
+                                body,
+                                prior,
+                                directory.transport if directory else None,
+                            )
                         )
                         return
                     if parts != ["auth", "logout"]:

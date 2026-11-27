@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -23,27 +24,51 @@ from .tables import (
 )
 
 IDENTIFIER = re.compile(r"(?=.*[0-9_])[A-Za-z0-9_.-]{3,}|[A-Z]{3,}")
-TOKEN = re.compile(r"[A-Za-z0-9_.-]{2,}")
+TOKEN = re.compile(r"\w+(?:[.-]\w+)*")
 STOPWORDS = frozenset(
-    "a an and are as at be by did do for from how i in is it my of on or the this that to was we what when where who why with".split()
+    (
+        "a an and are as at be by can could did do does for from how i in is it me my "
+        "of on or our the this that to was we what when where who why with would you "
+        "ada apa apakah atau bagaimana dan dari dengan di ini itu jadi kami kapan kata "
+        "ke kita mana mengenai oleh pada pernah saja saya siapa tentang tolong untuk yang"
+    ).split()
 )
 
 
 def _terms(query):
-    words = TOKEN.findall(query)
+    words = TOKEN.findall(unicodedata.normalize("NFKC", query))
     identifiers = list(
-        dict.fromkeys(word.lower() for word in words if IDENTIFIER.fullmatch(word))
+        dict.fromkeys(word.casefold() for word in words if IDENTIFIER.fullmatch(word))
     )
     keywords = list(
-        dict.fromkeys(word.lower() for word in words if word.lower() not in STOPWORDS)
+        dict.fromkeys(
+            _word_key(word.casefold())
+            for word in words
+            if len(word) > 1 and word.casefold() not in STOPWORDS
+        )
     )
     return keywords, identifiers
 
 
+def _word_key(word):
+    if (
+        len(word) > 4
+        and word.isalpha()
+        and word.endswith("s")
+        and not word.endswith("ss")
+    ):
+        return word[:-1]
+    return word
+
+
 def _score(text, keywords, identifiers):
-    normalized = text.lower()
-    hits = sum(keyword in normalized for keyword in keywords)
-    exact = sum(identifier in normalized for identifier in identifiers)
+    tokens = set(TOKEN.findall(unicodedata.normalize("NFKC", text).casefold()))
+    words = {_word_key(token) for token in tokens}
+    words.update(
+        _word_key(part) for token in tokens for part in re.split(r"[_.-]", token)
+    )
+    hits = len(words.intersection(keywords))
+    exact = len(tokens.intersection(identifiers))
     return exact * 3.0 + hits / max(1, len(keywords)) if hits or exact else 0.0
 
 
@@ -175,6 +200,7 @@ class Memory:
         if text is None:
             return {"state": "refused", "reason": "sensitive"}
         digest = self._hash(text)
+        created = now or datetime.now(timezone.utc)
         current = conn.execute(
             select(gb_memory.c.id, gb_memory.c.current_revision, gb_memory.c.state)
             .join(
@@ -186,6 +212,10 @@ class Memory:
                 gb_memory.c.group_key == group_key,
                 gb_memory_revisions.c.content_hash == digest,
                 gb_memory_revisions.c.status.in_(("pending", "approved", "active")),
+                or_(
+                    gb_memory_revisions.c.expires_at.is_(None),
+                    gb_memory_revisions.c.expires_at > created,
+                ),
             )
             .order_by(gb_memory.c.id)
             .limit(1)
@@ -198,7 +228,6 @@ class Memory:
                 "duplicate": True,
             }
         memory_id = str(uuid.uuid4())
-        created = now or datetime.now(timezone.utc)
         conn.execute(
             gb_memory.insert().values(
                 id=memory_id,
@@ -254,14 +283,16 @@ class Memory:
     ):
         parent = (
             conn.execute(
-                select(gb_memory).where(
-                    gb_memory.c.group_key == group_key, gb_memory.c.id == memory_id
-                )
+                select(gb_memory)
+                .where(gb_memory.c.group_key == group_key, gb_memory.c.id == memory_id)
+                .with_for_update()
             )
             .mappings()
             .first()
         )
-        if parent is None:
+        if parent is None or (
+            kwargs.get("require_active") and parent["state"] != "active"
+        ):
             return {"status": "not_found"}
         text = self._check_content(replacement)
         if text is None:
@@ -326,6 +357,8 @@ class Memory:
         reviewer_email,
         confirm_sharing,
         now=None,
+        *,
+        lexical_only=False,
     ):
         if confirm_sharing is not True:
             return {"status": "sharing_confirmation_required"}
@@ -333,9 +366,9 @@ class Memory:
             return {"status": "stale_revision"}
         memory = (
             conn.execute(
-                select(gb_memory).where(
-                    gb_memory.c.group_key == group_key, gb_memory.c.id == memory_id
-                )
+                select(gb_memory)
+                .where(gb_memory.c.group_key == group_key, gb_memory.c.id == memory_id)
+                .with_for_update()
             )
             .mappings()
             .first()
@@ -363,6 +396,7 @@ class Memory:
         current_time = now or datetime.now(timezone.utc)
         has_index = bool(
             self.runtime
+            and not lexical_only
             and self.runtime.index
             and self.runtime.config.embedding_configured
         )
@@ -809,10 +843,12 @@ class Memory:
                 "memory_id": row["id"],
                 "revision": row["revision"],
                 "category": row["category"],
-                "state": row["state"],
+                "state": row["status"],
                 "content_hash": row["content_hash"],
                 "proposed_by": row["proposed_by"],
-                "created_at": row["created_at"],
+                "created_at": row["created_at"].isoformat()
+                if row["created_at"]
+                else None,
             }
             allowed = can_read or (
                 reviewer_email
@@ -824,7 +860,7 @@ class Memory:
             results.append(item)
         return results
 
-    def search(self, runtime, conn, group_key, query, limit=5):
+    def search(self, runtime, conn, group_key, query, limit=5, *, verify_pool=False):
         state = policy.effective(conn, runtime.config, group_key)
         if not state.allows("memory"):
             return {"status": "disabled", "results": []}
@@ -862,20 +898,20 @@ class Memory:
         )
         all_rows = conn.execute(base).mappings().all()
         keywords, identifiers = _terms(query)
-        lexical = [
-            r
-            for r in all_rows
-            if _score(r["sanitized_content"], keywords, identifiers) > 0
-        ]
-        lexical.sort(
-            key=lambda r: (
-                -_score(r["sanitized_content"], keywords, identifiers),
-                r["id"],
-            )
+        lexical = sorted(
+            (
+                (
+                    -score,
+                    -row["approved_at"].timestamp() if row["approved_at"] else 0,
+                    row["id"],
+                )
+                for row in all_rows
+                if (score := _score(row["sanitized_content"], keywords, identifiers))
+            ),
         )
         rankings = {}
-        for rank, row in enumerate(lexical[: limit * 3], 1):
-            rankings[row["id"]] = rankings.get(row["id"], 0) + 1 / (60 + rank)
+        for rank, (_, _, memory_id) in enumerate(lexical[: limit * 3], 1):
+            rankings[memory_id] = 1 / (60 + rank)
         if runtime.index is not None and runtime.config.embedding_configured:
             namespace = namespace_for(runtime.config.collection, group_key, "memory")
             hits = runtime.index.search(
@@ -909,8 +945,9 @@ class Memory:
                 rankings[row["id"]] = rankings.get(row["id"], 0) + 1 / (60 + rank)
         by_id = {r["id"]: r for r in all_rows}
         results = []
+        size = limit * 3 if verify_pool else limit
         for memory_id in sorted(rankings, key=lambda item: (-rankings[item], item))[
-            :limit
+            :size
         ]:
             row = by_id[memory_id]
             sources = (
@@ -955,7 +992,7 @@ class Memory:
                         }
                         for s in sources
                     ],
-                    "state": "approved collective memory",
+                    "state": "saved group fact",
                 }
             )
         return {"status": "ok" if results else "partial", "results": results}

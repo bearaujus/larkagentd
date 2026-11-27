@@ -4,7 +4,7 @@ import logging
 
 from ..core.diagnostics import emit, job_fields
 from ..core.scopes import group_chat_scope
-from ..knowledge.learned import activate_candidate, verify_candidate
+from ..knowledge.learned import activate_candidate, candidate_evidence
 from ..knowledge.policy import effective
 from ..lark.ui_text import (
     KNOWLEDGE_DISABLED,
@@ -56,11 +56,12 @@ def prepare_passive_learning(service, job, session_id):
             return None
         state = effective(conn, runtime.config, scope)
         if not state.allows("memory") or state.generation != generation:
+            emit("knowledge.passive", **job_fields(job), outcome="policy_changed")
             return None
     owner = job["owner"].partition(":")[2]
-    live = verify_candidate(runtime, scope, owner, candidate)
+    outcome, live = candidate_evidence(runtime, scope, owner, candidate)
     if live is None:
-        emit("knowledge.passive", **job_fields(job), outcome="source_unavailable")
+        emit("knowledge.passive", **job_fields(job), outcome=outcome)
         return None
     return runtime, scope, owner, candidate, live, generation
 

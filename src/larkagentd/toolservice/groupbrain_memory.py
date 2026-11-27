@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from ..core.scopes import group_chat_scope
+from ..knowledge.catalog import Catalog
+from ..knowledge.learned import candidate_evidence
 from ..knowledge.lineage import resolve_sources
 from ..knowledge.memory import Memory
-from ..knowledge.policy import effective
+from ..knowledge.policy import effective, store
+from ..knowledge.recall import opaque
 from ..knowledge.sanitize import sanitize
 from ..knowledge.store import KnowledgeError
 
@@ -17,9 +20,11 @@ PROPOSE_DESCRIPTION = (
     "one of those messages. The Gateway checks the sources after the turn succeeds."
 )
 CORRECT_DESCRIPTION = (
-    "Propose a correction to an existing group memory. This creates a new pending revision and does not edit "
-    "or publish the existing fact. Nothing is shared until a group administrator reviews and approves it. "
-    "Do not include secrets, credentials, personal data, or private tool output. Never claim it was published."
+    "When a person explicitly asks to correct a saved group fact, use its memory_id from "
+    "group_knowledge_search and a verbatim excerpt from a human group message supporting the replacement. "
+    "Omit source_ids for the current message. Otherwise use the exact source IDs returned by group search. "
+    "This queues a correction for a workspace administrator; the existing fact stays active until approval. "
+    "Skip secrets, personal data, and private tool output."
 )
 PROPOSE_PARAMETERS = {
     "type": "object",
@@ -49,9 +54,10 @@ CORRECT_PARAMETERS = {
         "memory_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "replacement": {"type": "string", "minLength": 1, "maxLength": 4000},
         "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "evidence": {"type": "string", "minLength": 1, "maxLength": 500},
         "source_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
     },
-    "required": ["memory_id", "replacement", "reason"],
+    "required": ["memory_id", "replacement", "reason", "evidence"],
     "additionalProperties": False,
 }
 
@@ -85,6 +91,23 @@ def _valid_args(arguments, required, optional):
     return True
 
 
+def _source_ids(ctx, group_key, requested):
+    if not requested:
+        current = (ctx.turn or {}).get("message_id")
+        return [current] if current else []
+    supplied = list(dict.fromkeys(requested))
+    aliases = {item: item for item in supplied if item.startswith("om_")}
+    pending = [item for item in supplied if item not in aliases]
+    if pending:
+        for row in resolve_sources(ctx.group_brain, group_key, pending):
+            if row.get("group_key") == group_key:
+                message_id = row["lark_message_id"]
+                aliases[opaque("src", group_key, message_id)] = message_id
+    if any(item not in aliases for item in supplied):
+        return []
+    return list(dict.fromkeys(aliases[item] for item in supplied))
+
+
 def group_memory_correct(ctx, arguments):
     group_key = _scope(ctx)
     runtime = getattr(ctx, "group_brain", None)
@@ -92,7 +115,7 @@ def group_memory_correct(ctx, arguments):
         return {"status": "not_authorized"}
     if runtime is None:
         return {"status": "disabled", "reason": "global_disabled"}
-    required = {"memory_id", "replacement", "reason"}
+    required = {"memory_id", "replacement", "reason", "evidence"}
     if not _valid_args(arguments, required, {"source_ids"}) or any(
         not isinstance(arguments[key], str) or not arguments[key] for key in required
     ):
@@ -104,37 +127,52 @@ def group_memory_correct(ctx, arguments):
             "reason": state.reasons[0] if state.reasons else "memory_disabled",
         }
     source_ids = arguments.get("source_ids", [])
+    evidence = sanitize(arguments["evidence"], max_chars=500)
+    if not evidence.text or evidence.reasons:
+        return _invalid()
+    owner = ctx.owner.split(":", 1)[-1]
     try:
-        resolved = resolve_sources(runtime, group_key, source_ids) if source_ids else []
+        ids = _source_ids(ctx, group_key, source_ids)
+        outcome, live = candidate_evidence(
+            runtime,
+            group_key,
+            owner,
+            {
+                "ids": ids,
+                "current_only": not source_ids,
+                "evidence": evidence.text,
+            },
+        )
     except Exception:
         return {"status": "source_unavailable"}
-    verified_source_ids = list(
-        dict.fromkeys(
-            row["lark_message_id"]
-            for row in resolved
-            if row.get("group_key") == group_key
-            and isinstance(row.get("lark_message_id"), str)
-        )
-    )[:20]
+    if live is None:
+        return {"status": outcome}
     try:
         with runtime.connection() as conn:
+            store.row(conn, group_key, lock=True)
             current = effective(conn, runtime.config, group_key)
-            if not current.allows("memory"):
+            if not current.allows("memory") or current.generation != state.generation:
                 return {
                     "status": "disabled",
                     "reason": current.reasons[0]
                     if current.reasons
                     else "memory_disabled",
                 }
+            Catalog().upsert_messages(
+                conn,
+                group_key,
+                live.values(),
+                retention_days=runtime.config.source_retention_days,
+            )
             result = Memory(runtime).correct(
                 conn,
                 group_key,
-                ctx.owner.split(":", 1)[-1],
+                owner,
                 arguments["memory_id"],
                 arguments["replacement"],
                 arguments["reason"],
-                verified_source_ids,
-                verified_source_ids=verified_source_ids,
+                live,
+                require_active=True,
             )
     except KnowledgeError:
         return _invalid()
@@ -176,15 +214,10 @@ def group_memory_propose(ctx, arguments):
     if not state.allows("memory") or generation != state.generation:
         return {"status": "disabled"}
     sources = arguments.get("source_ids")
-    if sources:
-        try:
-            resolved = resolve_sources(runtime, group_key, sources)
-        except Exception:
-            return {"status": "source_unavailable"}
-        ids = list(dict.fromkeys(row["lark_message_id"] for row in resolved))[:8]
-    else:
-        current = (ctx.turn or {}).get("message_id")
-        ids = [current] if current else []
+    try:
+        ids = _source_ids(ctx, group_key, sources)
+    except Exception:
+        return {"status": "source_unavailable"}
     if not ids:
         return {"status": "source_unavailable"}
     staged = ctx.job_note and ctx.job_note(
@@ -197,4 +230,4 @@ def group_memory_propose(ctx, arguments):
             "current_only": not sources,
         }
     )
-    return {"status": "queued" if staged else "source_unavailable"}
+    return {"status": "queued" if staged else "not_staged"}

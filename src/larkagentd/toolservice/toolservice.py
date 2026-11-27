@@ -25,13 +25,17 @@ from ..core.crypto import Vault
 from ..core.diagnostics import actor_ref, configure_logging, emit
 from ..core.extensions import load_extension
 from ..core.fields import lark_app_owner
-from ..core.scopes import group_chat_scope, is_scopable
+from ..core.scopes import HUMAN_GROUP_TOOLS, group_chat_scope, is_scopable
 from ..core.store import Store
 from ..gateway.service import Service
 from ..knowledge.attachment_sync import AttachmentSync
 from ..knowledge.library import SourceLibrary
 from ..knowledge.runtime import build_runtime
+from ..knowledge.sanitize import sanitize
 from ..knowledge.wiki import WikiReader
+from ..lark.message_links import MESSAGE_ID, verified_link
+from ..lark.profile import label as profile_label
+from ..lark.ui_text import APP_FILE_REFUSALS
 from ..skills.skills import SkillStore
 from . import activity
 from .gitlab import GitlabReader
@@ -39,7 +43,7 @@ from .google import GoogleReader
 from .google import refusal as google_refusal
 from .larkcli import LarkError, LarkReader
 from .larkfiles import LarkFiles
-from .registry import Decision, ToolRegistry
+from .registry import READ, Decision, ToolRegistry, capability
 from .tools import TOOLS, ToolContext, ToolError, specs, validate
 from .web_search import WebSearch
 
@@ -52,6 +56,7 @@ DENIED_CODES = {
     "disabled": "tool_not_allowed",
     "needs_grant": "tool_not_allowed",
     "denied": "tool_not_allowed",
+    "app_read_only": "app_read_only",
     # Allowed by the registry but not enabled for this group.
     "group_scope": "not_enabled_for_group",
 }
@@ -60,6 +65,10 @@ MAX_RESULT = 64 * 1024
 TOOL_PATH = re.compile(r"/v1/tools/([a-z][a-z0-9_]{0,63})")
 
 LARK_READ_REFUSALS = {
+    "sheet_tab_not_found": (
+        "I opened the workbook, but couldn't find the requested tab. "
+        "Check the tab name or ask me to list its tabs."
+    ),
     "lark_permission_unverified": (
         "I couldn't verify that everyone in this group can view the file. "
         "Ask the document owner or bot administrator to check how the bot can verify group access."
@@ -113,6 +122,9 @@ LARK_EDIT_REFUSALS = {
     ),
     "write_outcome_unknown": (
         "I couldn't verify the result of the edit. Check the document before trying again."
+    ),
+    "write_no_change": (
+        "The document content is unchanged after the edit. Check the text to replace or the content to append."
     ),
 }
 
@@ -254,6 +266,26 @@ class ToolService:
         if turn.get("chat_type") != "group" or not turn.get("chat_id"):
             return reject(403, "group_turn_required")
         history_files = []
+        message_sources = {}
+
+        def observe_source(url, message_id, text, author=None, time_label=None):
+            url = verified_link(url, chat_id=turn["chat_id"])
+            if (
+                not url
+                or not isinstance(message_id, str)
+                or not MESSAGE_ID.fullmatch(message_id)
+            ):
+                return
+            excerpt = sanitize(text, max_chars=1600)
+            if excerpt.text:
+                message_sources[url] = {
+                    "message_id": message_id,
+                    "excerpt": excerpt.text,
+                    "truncated": "truncated" in excerpt.reasons,
+                    "author": profile_label(author),
+                    "time": time_label,
+                }
+
         context = ToolContext(
             turn["owner"],
             turn["credential_version"],
@@ -279,6 +311,7 @@ class ToolService:
             ),
             job_note=lambda **fields: self._note_job(turn["job_id"], **fields),
             lark_history_record=lambda *proof: history_files.append(proof),
+            observe_source=observe_source,
         )
         if name in (
             "lark_read",
@@ -354,6 +387,16 @@ class ToolService:
             return 200, {
                 "ok": False,
                 "error": code,
+                **(
+                    {
+                        "note": APP_FILE_REFUSALS.get(
+                            name,
+                            "This request came from a Lark app with read-only access.",
+                        )
+                    }
+                    if code == "app_read_only"
+                    else {}
+                ),
             }
         try:
             result = tool.run(context, arguments)
@@ -365,6 +408,16 @@ class ToolService:
                 raise ToolError("result_too_large")
             for proof in history_files:
                 self._note_history(turn["job_id"], *proof)
+            if message_sources and (
+                name == "lark_thread" or result.get("status") in {"ok", "partial"}
+            ):
+                self._note_job(
+                    turn["job_id"],
+                    message_citations={
+                        "session_id": session_id,
+                        "links": message_sources,
+                    },
+                )
         except (ToolError, LarkError) as exc:
             code = exc.code
             activity.finish(self.store, activity_id, started, "failed", error=code)
@@ -386,7 +439,17 @@ class ToolService:
             if name in ("lark_read", "lark_image", "lark_file_read") and (
                 code == "not_configured" or code in LARK_READ_REFUSALS
             ):
-                return 200, lark_refusal(code, reader_missing=self.lark is None)
+                result = lark_refusal(code, reader_missing=self.lark is None)
+                if (
+                    code == "lark_permission_unverified"
+                    and diagnostics.get("bot_access") == "granted"
+                ):
+                    result["note"] = (
+                        "The bot has View access. Lark blocked its collaborator check, so I "
+                        "couldn't verify this group's access. Ask the file owner to let the bot "
+                        "see the collaborators for this file."
+                    )
+                return 200, result
             if (
                 name in ("lark_file_edit", "run_confirmed_action")
                 and code in LARK_EDIT_REFUSALS
@@ -428,7 +491,10 @@ class ToolService:
         if name in (
             "group_search_discussions",
             "group_knowledge_search",
+            "group_knowledge_sources",
             "group_get_discussion",
+            "group_memory_propose",
+            "group_memory_correct",
         ):
             diagnostics = {
                 "result_status": result.get("status"),
@@ -455,8 +521,8 @@ class ToolService:
             return decision
         if lark_app_owner(turn["owner"]):
             tool = self.tools.get(name)
-            if tool is None or tool.risk != "read":
-                return Decision(False, "denied")
+            if tool is None or capability(tool)[1] != READ or name in HUMAN_GROUP_TOOLS:
+                return Decision(False, "app_read_only")
         return self.group_decision(turn, name)
 
     def group_decision(self, turn, name):

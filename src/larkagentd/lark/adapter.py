@@ -25,6 +25,8 @@ from lark_oapi.api.im.v1 import (
     GetMessageRequest,
     GetMessageResourceRequest,
     ListMessageRequest,
+    MergeForwardMessageRequest,
+    MergeForwardMessageRequestBody,
     PatchMessageRequest,
     PatchMessageRequestBody,
     ReplyMessageRequest,
@@ -38,6 +40,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 from ..core.diagnostics import emit
 from ..core.fields import LARK_APP_ID, normalize_email
+from ..knowledge.sanitize import sanitize
 from . import render
 from .inbound import (
     IMAGE,
@@ -49,6 +52,7 @@ from .inbound import (
     session_of,
     without_names,
 )
+from .message_links import MESSAGE_ID, THREAD_ID
 from .profile import label, profile_fields
 from .ui_text import TOASTS
 
@@ -102,6 +106,16 @@ class Lark:
             return self.send_file(payload, key)
         reply_to = payload.get("reply_to")
         thread = bool(payload.get("thread"))
+        if (
+            thread
+            and payload.get("gb_group") == "group:" + payload["chat"]
+            and payload.get("source_message_id")
+        ):
+            forwarded = self.forward_source(
+                payload["chat"], reply_to, payload["source_message_id"], key
+            )
+            if forwarded:
+                return forwarded
         # A long answer goes out as several messages, in order, from this one job; a short one
         # is a single part. The first part picks the way it is delivered: the table card first
         # when there is one, then markdown, then plain text if Lark rejects the post; quoted
@@ -109,6 +123,7 @@ class Lark:
         # once-only.
         answer_to = payload.get("answer_to")
         mention = render.mention_id(answer_to)
+        native_reply = payload.get("native_reply")
         body = render.inert_mentions(payload["text"]) if answer_to else payload["text"]
         parts = (
             [render.final_post(body, payload.get("usage_footer", ""))]
@@ -140,6 +155,14 @@ class Lark:
             if mention:
                 attempts.extend(
                     ("interactive", render.addressed_card(card, None)) for card in cards
+                )
+            if native_reply:
+                attempts.insert(
+                    0,
+                    (
+                        "text",
+                        render.plain(render.inert_mentions(native_reply), mention),
+                    ),
                 )
             attempts.extend(
                 [
@@ -183,6 +206,62 @@ class Lark:
                     )
                 return message_id
         raise RuntimeError("Lark delivery failed")
+
+    def forward_source(self, chat, reply_to, source_id, key):
+        """Deliver a native source card in the verified reply thread."""
+        if not reply_to or not MESSAGE_ID.fullmatch(source_id):
+            return None
+        try:
+            target, _ = self.message_items(reply_to)
+            source, _ = self.message_items(source_id)
+        except RuntimeError:
+            return None
+        thread = getattr(target, "thread_id", None)
+        if (
+            not isinstance(thread, str)
+            or not THREAD_ID.fullmatch(thread)
+            or target.chat_id != chat
+            or source.chat_id != chat
+            or source.msg_type != "text"
+            or not source.body
+            or not source.sender
+            or source.sender.sender_type != "user"
+        ):
+            return None
+        body = normalize(
+            source.msg_type,
+            source.body.content,
+            source_id,
+            getattr(source, "mentions", None) or (),
+        )
+        if sanitize(body.text).reasons:
+            return None
+        result = self.client.im.v1.message.merge_forward(
+            MergeForwardMessageRequest.builder()
+            .receive_id_type("thread_id")
+            .uuid(key)
+            .request_body(
+                MergeForwardMessageRequestBody.builder()
+                .receive_id(thread)
+                .message_id_list([source_id])
+                .build()
+            )
+            .build()
+        )
+        if not result.success():
+            emit(
+                "delivery.source_preview",
+                logging.INFO,
+                outcome="fallback",
+                provider_code=result.code,
+            )
+            return None
+        if result.data and result.data.message and result.data.message.message_id:
+            emit("delivery.source_preview", logging.INFO, outcome="forwarded")
+            return result.data.message.message_id
+        if result.data and result.data.invalid_message_id_list:
+            return None
+        raise RuntimeError("Lark accepted source forwarding without a receipt")
 
     def send_parts(self, chat, target, msg_type, parts, key, thread):
         """The rest of a long answer, one message each, in order, to the same place and in the

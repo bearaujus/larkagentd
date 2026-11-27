@@ -2,7 +2,8 @@
 
 import re
 
-from ..knowledge.learned import check_sources, list_records
+from ..knowledge.learned import check_sources, list_records, references
+from ..knowledge.memory import Memory
 from ..knowledge.policy import effective
 from .access import AccessError, group_scope
 
@@ -60,6 +61,11 @@ def learned_page(access, token, parts, query, actor, transport, verify_group_adm
             "content": row["sanitized_content"]
             if checked["status"] == "verified"
             else None,
+            "saved_at": row["approved_at"].isoformat() if row["approved_at"] else None,
+            "expires_at": min(
+                [row["expires_at"]]
+                + [ref["expires_at"] for ref in row["refs"] if ref["expires_at"]]
+            ).isoformat(),
             **checked,
         }
         for row, checked in zip(rows, evidence)
@@ -71,3 +77,84 @@ def learned_page(access, token, parts, query, actor, transport, verify_group_adm
         "state": state.state,
         "learning": state.allows("memory"),
     }
+
+
+def correction_review(access, token, parts, method, body, actor, transport):
+    """Verify membership and Lark sources outside the database transaction."""
+    scope = group_scope(parts[1])
+    access.scoped_request(actor, parts, method)
+    if actor["role"] != "admin":
+        raise AccessError(403, "admin_required")
+
+    def is_member():
+        try:
+            return transport is not None and transport.group_member(
+                parts[1], actor["owner"].split(":", 1)[-1]
+            )
+        except (RuntimeError, OSError, AttributeError):
+            raise AccessError(503, "group_role_unavailable") from None
+
+    member = is_member()
+    if method == "POST" and not member:
+        raise AccessError(403, "group_membership_required")
+
+    def snapshot_corrections(conn, current):
+        if current["role"] != "admin" or current["owner"] != actor["owner"]:
+            raise AccessError(403, "admin_required")
+        access.policy(conn, scope)
+        state = effective(conn, access.knowledge_config, scope)
+        items = Memory().list_candidates(conn, scope, can_read=member)
+        if method == "POST":
+            items = [
+                item
+                for item in items
+                if item["memory_id"] == parts[4]
+                and item["revision"] == body.get("revision")
+            ]
+        refs = (
+            [
+                references(conn, scope, item["memory_id"], item["revision"])
+                for item in items
+            ]
+            if member
+            else []
+        )
+        return state, items, refs
+
+    with access.store.engine.begin() as conn:
+        initial = snapshot_corrections(conn, access.authenticate(conn, token))
+    state, items, refs = initial
+    if not member:
+        return 200, {"candidates": items}
+    source = access.knowledge_runtime.source if access.knowledge_runtime else None
+    checked = check_sources(source, scope, refs)
+    if items and not is_member():
+        raise AccessError(403, "group_membership_required")
+    with access.store.engine.begin() as conn:
+        current = access.authenticate(conn, token)
+        access.scoped_request(current, parts, method)
+        if snapshot_corrections(conn, current) != initial:
+            raise AccessError(409, "knowledge_changed")
+        if method == "POST":
+            if not state.allows("memory"):
+                raise AccessError(409, "disabled")
+            if not checked:
+                raise AccessError(404, "not_found")
+            if checked[0]["status"] != "verified":
+                raise AccessError(409, "source_unavailable")
+            return access.dispatch(
+                conn,
+                {
+                    **current,
+                    "correction_evidence": (scope, parts[4], items[0]["revision"]),
+                },
+                method,
+                parts,
+                body,
+            )
+        for item, evidence in zip(items, checked):
+            if evidence["status"] != "verified":
+                item.pop("content", None)
+                item.pop("reason", None)
+            item.update(evidence)
+        return 200, {"candidates": items}

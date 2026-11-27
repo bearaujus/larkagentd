@@ -2126,15 +2126,52 @@ tbody > tr:hover {
 .fact-list {
   list-style: none;
   padding: 0;
+  margin: 1rem 0;
 }
-.fact-list li {
-  padding: 1rem 0;
+.fact-list > li {
+  padding: 1rem 0 1.15rem;
   border-top: 1px solid var(--border, #dce1e8);
   overflow-wrap: anywhere;
 }
-.fact-list small {
+.fact-meta {
   display: block;
+  margin-bottom: 0.4rem;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+.fact-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  color: var(--muted);
   margin-top: 0.4rem;
+}
+.fact-status {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.fact-status[data-active="true"] {
+  background: #eaf5ef;
+  border-color: #cde6d6;
+  color: #236243;
+}
+.fact-empty {
+  margin-block: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  padding: 1rem;
+}
+.fact-empty p,
+.fact-unavailable p {
+  margin: 0.25rem 0 0;
+}
+.fact-unavailable {
+  margin-bottom: 0.85rem;
 }
 .fact-list blockquote {
   margin: 0.8rem 0;
@@ -2159,7 +2196,7 @@ tbody > tr:hover {
   text-decoration: underline;
 }
 .knowledge-panel h2 {
-  margin-bottom: 0.8rem;
+  margin-bottom: 0.25rem;
 }
 
 .report-actions,

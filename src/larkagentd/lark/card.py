@@ -9,8 +9,10 @@ table cannot be laid out, and the caller sends the text layout instead.
 import csv
 import io
 import json
+import re
 from collections import namedtuple
 
+from ..knowledge.sanitize import normalize
 from .render import cells, close_fence, shorten
 
 PAGE_ROWS = 10
@@ -199,11 +201,75 @@ def reply_layout(elements, footer, confirmation, title=None):
     return card
 
 
-def reply_card(answer, fallback, previews, footer, confirmation):
+def source_answer(answer, source):
+    markup = source["markup"]
+    original = normalize(source["excerpt"])
+    source_heading = re.compile(r"^(?:the )?original (?:lark )?message\b.*:\s*$", re.I)
+    remaining = []
+    for line in answer.splitlines():
+        if markup in line and line.replace(markup, "").strip().lower() in {
+            "",
+            "original message:",
+            "the original message:",
+            "source:",
+            "original lark message:",
+        }:
+            continue
+        quote = line.strip()
+        if normalize(quote.lstrip("> ").strip('"“”')) == original:
+            # The rendered evidence already shows this verbatim text. Keep an
+            # unmarked identical sentence if it is the answer itself.
+            preceding = next(
+                (i for i in range(len(remaining) - 1, -1, -1) if remaining[i].strip()),
+                None,
+            )
+            if preceding is not None and source_heading.fullmatch(
+                remaining[preceding].strip()
+            ):
+                del remaining[preceding:]
+                continue
+            if quote.startswith((">", '"', "“")):
+                continue
+        remaining.append(line.replace(markup, source["label"]))
+    return "\n".join(remaining).strip() or "Here’s the original message."
+
+
+def reply_card(answer, fallback, previews, footer, confirmation, *, source=None):
     if previews:
         card = preview_card(answer, previews, footer=footer, confirmation=confirmation)
         if card:
             return card
+    if source:
+        elements = [
+            {"tag": "markdown", "content": source_answer(fallback, source)},
+            {"tag": "hr"},
+        ]
+        detail = source["excerpt"]
+        source_hint = " · ".join(
+            field for field in (source.get("author"), source.get("time")) if field
+        )
+        elements.append({"tag": "markdown", "content": "**Original message**"})
+        if source_hint:
+            elements.append({"tag": "div", "text": text(source_hint)})
+        elements.append({"tag": "div", "text": text(clip(detail, 360))})
+        if len(detail) > 360:
+            elements.append(
+                {
+                    "tag": "collapsible_panel",
+                    "expanded": False,
+                    "header": {
+                        "title": text(
+                            "Read more of the message"
+                            if source.get("truncated")
+                            else "Read the full message"
+                        )
+                    },
+                    "elements": [{"tag": "div", "text": text(detail)}],
+                }
+            )
+        card = reply_layout(elements, footer, confirmation)
+        if size(card) <= BUDGET:
+            return json.dumps(card, ensure_ascii=False)
     # Fit the complete answer when possible, including wide Unicode and byte-heavy tables.
     room = len(fallback)
     while room > 0:

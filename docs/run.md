@@ -22,7 +22,7 @@
    then send `/setup` in a DM. Remove the test user's group membership and verify setup
    and any in-flight credential confirmation are refused. Verify workspace and group
    dashboard login use their respective administrator roles. With collective memory enabled, share
-   a durable test decision and look for it under Learned from conversations after the reply. Ask for
+   a durable test decision as a person and look for it under Saved from conversations after the reply. Ask for
    the first visible group message and for the link to the decision to exercise live history.
 5. Create and edit each native file type in the test group. Check actual owner, group
    Manage, bot Manage and final content. Exercise group View with independently granted

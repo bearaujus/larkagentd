@@ -79,6 +79,14 @@ export type GroupKnowledgeCandidate = {
   created_at: string;
   content?: string;
   reason?: string;
+  sources?: {
+    source_id: string;
+    url: string | null;
+    excerpt: string;
+    time: string;
+  }[];
+  status?:
+    "verified" | "temporarily_unavailable" | "source_changed_or_unavailable";
 };
 export type GroupKnowledgeDocument = {
   id: string;

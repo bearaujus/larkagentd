@@ -652,7 +652,7 @@ test("dashboard screenshots with synthetic fixtures", async ({
       process.env.LARKAGENTD_SCREENSHOTS !== "1",
   );
   await page.setViewportSize({ width: 1440, height: 900 });
-  const capture = async (name: string, selector?: string) => {
+  const capture = async (name: string) => {
     await page.evaluate(() => {
       const label = document.createElement("div");
       label.textContent = "SYNTHETIC DATA";
@@ -660,13 +660,16 @@ test("dashboard screenshots with synthetic fixtures", async ({
         "position:fixed;bottom:12px;right:16px;background:#15243c;color:white;padding:6px 9px;font:11px system-ui;z-index:100;border-radius:4px";
       document.body.append(label);
     });
-    const path = `../docs/screenshots/${name}.png`;
-    if (selector)
-      await page.locator(selector).screenshot({ path, animations: "disabled" });
-    else await page.screenshot({ path, animations: "disabled" });
+    await page.screenshot({
+      path: `../docs/screenshots/${name}.png`,
+      animations: "disabled",
+    });
   };
   await page.goto("/dashboard/");
   await expect(page.getByText("1.3M", { exact: true })).toBeVisible();
+  await expect(
+    page.locator(".recharts-bar-rectangle path").first(),
+  ).toBeVisible();
   await capture("overview");
   await page.goto("/dashboard/groups");
   await expect(
@@ -714,14 +717,17 @@ test("dashboard screenshots with synthetic fixtures", async ({
             sources: [
               {
                 source_id: "pilot-note",
-                time: "2026-01-05T09:00:00Z",
-                excerpt: "We agreed to invite 30 people to the first pilot.",
-                url: null,
+                time: "2026-11-05T09:00:00Z",
+                excerpt:
+                  "We agreed to invite 30 people to the first pilot. Please have the rollout checklist ready by Friday.",
+                url: "https://applink.larksuite.com/client/message/open?messageId=om_example",
               },
             ],
             id: "pilot",
             category: "decision",
             content: "The pilot will start with 30 participants.",
+            saved_at: "2026-11-05T09:02:00Z",
+            expires_at: "2026-12-05T09:02:00Z",
           },
         ],
       },
@@ -1302,7 +1308,8 @@ test("Group Brain approves a visible note only after sharing confirmation", asyn
       memory_id: "mem_example0001",
       revision: 3,
       category: "decision",
-      state: "candidate",
+      state: "pending",
+      status: "verified",
       content_hash: "sha256_example",
       proposed_by: "ou_alice0001",
       created_at: "2026-11-26T12:00:00Z",
@@ -1315,12 +1322,14 @@ test("Group Brain approves a visible note only after sharing confirmation", asyn
   const approve = review.getByRole("button", { name: "Approve" });
   await expect(approve).toBeDisabled();
   await review
-    .getByLabel("I confirm this note may be shared with everyone in this group")
+    .getByLabel("I confirm this correction can be shared with the group")
     .check();
   await expect(approve).toBeEnabled();
   await approve.click();
-  await expect(review).toContainText("No notes waiting for review.");
-  await expect(page.locator(".group-brain")).toContainText("Note approved.");
+  await expect(review).toContainText("No corrections waiting for review.");
+  await expect(page.locator(".group-brain")).toContainText(
+    "Correction approved.",
+  );
   expect(
     state.requests.find(
       (request) =>
@@ -1348,7 +1357,7 @@ test("Group Brain keeps metadata-only notes rejectable without offering approval
       memory_id: "mem_example0002",
       revision: 1,
       category: "fact",
-      state: "candidate",
+      state: "pending",
       content_hash: "sha256_hidden",
       proposed_by: "ou_alice0001",
       created_at: "2026-11-26T12:00:00Z",
@@ -1357,7 +1366,7 @@ test("Group Brain keeps metadata-only notes rejectable without offering approval
   await page.goto("/dashboard/groups/oc_platform?view=knowledge");
   const review = page.locator(".group-brain-review-lists");
   await expect(review).toContainText(
-    "Text is hidden because the reviewer cannot see its source.",
+    "The correction is hidden until its source can be verified.",
   );
   await expect(review.getByRole("button", { name: "Approve" })).toHaveCount(0);
   await expect(review.getByRole("button", { name: "Reject" })).toBeVisible();
@@ -1377,7 +1386,7 @@ test("Group Brain managers see review lists without action buttons", async ({
       memory_id: "mem_example0003",
       revision: 1,
       category: "fact",
-      state: "candidate",
+      state: "pending",
       content_hash: "sha256_manager",
       proposed_by: "ou_alice0001",
       created_at: "2026-11-26T12:00:00Z",
@@ -1387,7 +1396,7 @@ test("Group Brain managers see review lists without action buttons", async ({
   ];
   await page.goto("/dashboard/groups/oc_platform?view=knowledge");
   const review = page.locator(".group-brain-review-lists");
-  await expect(review).toContainText("Notes to review");
+  await expect(review).toContainText("Corrections to review");
   await expect(review.getByRole("button")).toHaveCount(0);
 });
 
@@ -1402,6 +1411,8 @@ test("group facts show the cited message and require confirmation before removal
     activation: "source_checked",
     status: "verified",
     content: "Use the blue template.",
+    saved_at: "2026-01-01T10:05:00Z",
+    expires_at: "2026-01-15T10:05:00Z",
     sources: [
       {
         source_id: "note",
@@ -1432,19 +1443,27 @@ test("group facts show the cited message and require confirmation before removal
     .getByRole("navigation", { name: "Group sections" })
     .getByRole("link", { name: "Knowledge" })
     .click();
-  await expect(page.getByText(fact.sources[0].excerpt)).toBeVisible();
+  const saved = page.getByRole("region", { name: "Saved from conversations" });
+  await expect(saved.getByText(fact.sources[0].excerpt)).toBeVisible();
+  await expect(
+    saved.getByText("Saved automatically", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    saved.getByText("Available until", { exact: false }),
+  ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Open source message" }),
   ).toHaveAttribute("href", fact.sources[0].url);
-  await page.getByRole("button", { name: "Stop using this fact" }).click();
+  await page.getByRole("button", { name: "Retire fact" }).click();
   await page.getByRole("button", { name: "Cancel" }).click();
   expect(retired).toBe(false);
-  await page.getByRole("button", { name: "Stop using this fact" }).click();
+  await page.getByRole("button", { name: "Retire fact" }).click();
   await page
     .getByRole("alertdialog")
-    .getByRole("button", { name: "Stop using this fact" })
+    .getByRole("button", { name: "Retire fact" })
     .click();
-  await expect(page.getByText("No active facts on this page.")).toBeVisible();
+  await expect(page.getByText("No saved facts yet")).toBeVisible();
+  await expect(page.getByText("Fact retired.")).toBeVisible();
 });
 
 for (const group of [false, true]) {
@@ -1503,7 +1522,7 @@ for (const group of [false, true]) {
     await page.goto("/dashboard/");
     await page.getByRole("link", { name: "Knowledge", exact: true }).click();
     if (group)
-      await page.getByLabel("View sources for").selectOption("oc_platform");
+      await page.getByLabel("View knowledge for").selectOption("oc_platform");
     await page.getByRole("button", { name: "Add source" }).click();
     const dialog = page.getByRole("dialog");
     const input = dialog.getByRole("textbox", {
@@ -1543,11 +1562,11 @@ for (const group of [false, true]) {
     await expect(page.getByText("Refresh queued.")).toBeVisible();
     expect(refreshed).toBe(true);
     if (group) {
-      await expect(page.getByLabel("View sources for")).toHaveValue(
+      await expect(page.getByLabel("View knowledge for")).toHaveValue(
         "oc_platform",
       );
       await expect(page).toHaveURL(/knowledge\?group=oc_platform$/);
-      await page.getByLabel("View sources for").selectOption("");
+      await page.getByLabel("View knowledge for").selectOption("");
       await expect(
         page.getByRole("heading", { name: "Workspace sources" }),
       ).toBeVisible();
@@ -1594,11 +1613,20 @@ test("a scoped admin sees the group and can correct a source save error", async 
       ? r.fulfill({ status: 409, json: { error: "source_name_in_use" } })
       : r.fulfill({ json: { id: "second-source" } });
   });
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/dashboard/");
+  const saved = page.getByRole("region", { name: "Saved from conversations" });
+  await expect(saved.getByText("No saved facts yet")).toBeVisible();
+  await expect(
+    saved.getByRole("link", { name: "Learning settings and corrections" }),
+  ).toHaveCount(0);
+  expect(
+    await saved.evaluate((panel) => panel.scrollWidth <= panel.clientWidth),
+  ).toBe(true);
   await expect(
     page.getByText("Available in Platform Engineering only.", { exact: false }),
   ).toBeVisible();
-  await expect(page.getByLabel("View sources for")).toHaveCount(0);
+  await expect(page.getByLabel("View knowledge for")).toHaveCount(0);
   const add = page.getByRole("button", { name: "Add source", exact: true });
   await add.click();
   const dialog = page.getByRole("dialog");
