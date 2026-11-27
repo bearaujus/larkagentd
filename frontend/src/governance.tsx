@@ -1,3 +1,4 @@
+import { useLocation } from "react-router";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, client, write } from "./api";
@@ -208,37 +209,39 @@ function ModelRates({
 }: Controls & { data: GovernanceData }) {
   const [model, setModel] = useState(data.model || data.models[0]?.id || "");
   return (
-    <Panel
-      title="Model rates"
-      description="USD per million tokens. Rate changes apply to newly started turns. Leave a rate blank when pricing is unavailable."
-    >
-      <div className="panel-body">
-        {data.models.length ? (
-          <>
-            <label>
-              Model to price
-              <select
-                value={model}
-                disabled={controls.busy}
-                onChange={(e) => setModel(e.target.value)}
-              >
-                {data.models.map(({ id }) => (
-                  <option key={id}>{id}</option>
-                ))}
-              </select>
-            </label>
-            <RateForm
-              key={JSON.stringify([model, data.prices[model]])}
-              model={model}
-              rates={data.prices[model]}
-              {...controls}
-            />
-          </>
-        ) : (
-          <p className="muted">No provider models are configured.</p>
-        )}
-      </div>
-    </Panel>
+    <section id="model-rates" tabIndex={-1} aria-label="Model rates">
+      <Panel
+        title="Model rates"
+        description="USD per million tokens. Rate changes apply to newly started turns. Leave a rate blank when pricing is unavailable."
+      >
+        <div className="panel-body">
+          {data.models.length ? (
+            <>
+              <label>
+                Model to price
+                <select
+                  value={model}
+                  disabled={controls.busy}
+                  onChange={(e) => setModel(e.target.value)}
+                >
+                  {data.models.map(({ id }) => (
+                    <option key={id}>{id}</option>
+                  ))}
+                </select>
+              </label>
+              <RateForm
+                key={JSON.stringify([model, data.prices[model]])}
+                model={model}
+                rates={data.prices[model]}
+                {...controls}
+              />
+            </>
+          ) : (
+            <p className="muted">No provider models are configured.</p>
+          )}
+        </div>
+      </Panel>
+    </section>
   );
 }
 
@@ -677,6 +680,35 @@ function BotAccess() {
   );
 }
 
+const governanceSections = [
+  ["model-rates", "Model rates"],
+  ["token-allowances", "Token allowances"],
+  ["flex-assignments", "FlexTier assignments"],
+  ["quota-history", "Quota history"],
+] as const;
+
+function GovernanceNavigation() {
+  const { hash } = useLocation();
+  useEffect(() => {
+    const id = hash.slice(1);
+    if (governanceSections.some(([key]) => key === id)) {
+      const section = document.getElementById(id);
+      section?.scrollIntoView({ block: "start" });
+      section?.focus({ preventScroll: true });
+    }
+  }, [hash]);
+  return (
+    <nav className="governance-jumps" aria-label="Governance sections">
+      <span>Jump to</span>
+      {governanceSections.map(([id, label]) => (
+        <a key={id} href={"#" + id}>
+          {label}
+        </a>
+      ))}
+    </nav>
+  );
+}
+
 export function Governance({ session }: { session: Session }) {
   const path = "/governance";
   const query = useQuery({
@@ -706,6 +738,7 @@ export function Governance({ session }: { session: Session }) {
         title="Governance"
         description="Manage models, token allowances, and estimated spend."
       />
+      <GovernanceNavigation />
       <BotAccess />
       {!controls.canEdit && <Notice>Admins can change these settings.</Notice>}
       {action.feedback}
@@ -715,14 +748,28 @@ export function Governance({ session }: { session: Session }) {
         {...controls}
       />
       <ModelRates data={data} {...controls} />
-      <SharedPools
-        pools={data.pools}
-        resetsOn={data.quota.resets_on}
-        {...controls}
-      />
-      <QuotaSettings quota={data.quota} {...controls} />
-      <FlexAssignments data={data} {...controls} />
-      <QuotaHistory />
+      <section
+        id="token-allowances"
+        tabIndex={-1}
+        aria-label="Token allowances"
+      >
+        <SharedPools
+          pools={data.pools}
+          resetsOn={data.quota.resets_on}
+          {...controls}
+        />
+        <QuotaSettings quota={data.quota} {...controls} />
+      </section>
+      <section
+        id="flex-assignments"
+        tabIndex={-1}
+        aria-label="FlexTier assignments"
+      >
+        <FlexAssignments data={data} {...controls} />
+      </section>
+      <section id="quota-history" tabIndex={-1} aria-label="Quota history">
+        <QuotaHistory />
+      </section>
     </>
   );
 }

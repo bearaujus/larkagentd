@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from .core.database import database_url
 from .core.diagnostics import emit
+from .core.fields import LARK_APP_ID
 from .core.googlefeedback import configured_email
 from .gateway.access import admin_emails, public_origin
 from .knowledge.models import GroupBrainConfig
@@ -55,6 +56,7 @@ class Config:
     google_service_account_email: str | None = field(default=None, repr=False)
     # Group Brain: the global switch and limits. Per-group settings are in the database.
     group_brain: GroupBrainConfig = field(default_factory=GroupBrainConfig)
+    lark_allowed_senders: tuple[str, ...] = ("user",)
 
     @classmethod
     def load(cls):
@@ -116,7 +118,20 @@ class Config:
                 os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
             ),
             group_brain=_group_brain_settings(),
+            lark_allowed_senders=_lark_senders(os.environ["LARK_APP_ID"]),
         )
+
+
+def _lark_senders(app_id):
+    entries = (
+        entry.strip() for entry in os.getenv("LARK_ALLOWED_SENDERS", "").split(",")
+    )
+    senders = tuple(dict.fromkeys(entry for entry in entries if entry))
+    if any(entry != "user" and not LARK_APP_ID.fullmatch(entry) for entry in senders):
+        raise ValueError("LARK_ALLOWED_SENDERS must contain user or exact Lark app IDs")
+    if app_id in senders:
+        raise ValueError("LARK_ALLOWED_SENDERS cannot contain the receiving app")
+    return senders or ("user",)
 
 
 def _token_quota():

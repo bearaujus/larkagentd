@@ -13,6 +13,7 @@ import {
 import { Dialog, Tooltip } from "radix-ui";
 import {
   ArrowRight,
+  BookOpen,
   ChartNoAxesCombined,
   LayoutDashboard,
   LogOut,
@@ -32,7 +33,11 @@ import {
 } from "./api";
 import { Badge, Failure, Hint, Loading, Notice, useAction } from "./components";
 import { Identity, useDirectory } from "./directory";
-import { KnowledgeLibrary } from "./knowledge-library";
+import {
+  KnowledgeLibrary,
+  WorkspaceKnowledge,
+  useLearnedPage,
+} from "./knowledge-library";
 import { GroupDetail, Groups, People } from "./policies";
 import { Usage } from "./usage";
 import { Governance } from "./governance";
@@ -153,7 +158,7 @@ const navItems = [
   ["/groups", "Groups", UsersRound],
   ["/usage", "Usage", ChartNoAxesCombined],
   ["/governance", "Governance", ShieldCheck],
-  ["/knowledge", "Knowledge", UsersRound],
+  ["/knowledge", "Knowledge", BookOpen],
 ] as const;
 function Shell({ session }: { session: Session }) {
   const location = useLocation();
@@ -163,8 +168,8 @@ function Shell({ session }: { session: Session }) {
   const directory = useDirectory([target]);
   useEffect(() => {
     setOpen(false);
-    window.scrollTo(0, 0);
-  }, [location.pathname]);
+    if (!location.hash) window.scrollTo(0, 0);
+  }, [location.pathname, location.hash]);
   const navigation = (
     <>
       <Link className="brand" to="/">
@@ -275,7 +280,7 @@ function Shell({ session }: { session: Session }) {
             <Route path="/people" element={<People session={session} />} />
             <Route path="/groups" element={<Groups />} />
             {session.role === "admin" && (
-              <Route path="/knowledge" element={<KnowledgeLibrary />} />
+              <Route path="/knowledge" element={<WorkspaceKnowledge />} />
             )}
             <Route
               path="/groups/:id"
@@ -307,6 +312,9 @@ function Shell({ session }: { session: Session }) {
 }
 function GroupKnowledge({ groupId }: { groupId: string }) {
   const action = useAction();
+  const groupName =
+    useLearnedPage("/groups/" + encodeURIComponent(groupId) + "/knowledge").data
+      ?.group_name || groupId;
   return (
     <main className="group-knowledge-page">
       <header>
@@ -324,7 +332,7 @@ function GroupKnowledge({ groupId }: { groupId: string }) {
           Sign out
         </button>
       </header>
-      <KnowledgeLibrary groupId={groupId} />
+      <KnowledgeLibrary groupId={groupId} groupName={groupName} />
       {action.feedback}
     </main>
   );

@@ -48,6 +48,7 @@ READ_COMMANDS = frozenset(
         ("docs", "+media-download"),
         ("docs", "+media-preview"),
         ("wiki", "+node-get"),
+        ("wiki", "+node-list"),
         ("sheets", "+workbook-info"),
         ("sheets", "+cells-get"),
         ("base", "+table-list"),

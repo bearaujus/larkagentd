@@ -720,8 +720,8 @@ TOOLS.update(
     for tool in (
         work_tool(
             "search_group_knowledge",
-            "Search the workspace and current group's curated Markdown and registered workspace MCP "
-            "sources for a policy, guide, process or definition. Cite the returned source title. "
+            "Search the workspace and current group's Markdown, attached Lark Wikis and Docs, and workspace MCP "
+            "sources for a policy, guide, process or definition. Cite the returned page link and section. "
             "For old group conversations and learned decisions also call group_knowledge_search.",
             ("query",),
             kind="knowledge",
@@ -742,9 +742,10 @@ TOOLS.update(
             "Read the respective built-in skill first. kind is docx, sheets or slides. content is "
             "Markdown, a JSON-encoded matrix of plain values, or a JSON-encoded array of 1 to 6 slides. "
             "Slide titles are at most 72 characters. Provide either 1 to 5 bullets of at most 100 characters each "
-            "or a chart object with categories and series for native grouped columns. "
+            "or a chart object with categories and series for native grouped columns "
+            "or 100% stacked bars (type=percent_stacked_bar). "
             "Follow the tool's note on failure. A partial creation needs verification before another attempt. "
-            "Use only verified facts. Report the returned URL only when verified=true.",
+            "Use only verified facts. verified=true already includes readback; report its returned URL.",
             ("kind", "title", "content"),
         ),
         work_tool(

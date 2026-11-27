@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from http.server import ThreadingHTTPServer
 from threading import Thread
@@ -15,6 +15,7 @@ from test_group_chat import GROUP, ask, direct, owner_state, room, texts
 
 from larkagentd.core.store import (
     governance_flex,
+    query_activity,
     token_usage,
 )
 from larkagentd.gateway.access import Access, AccessError
@@ -91,6 +92,16 @@ def usage(service, owner=OWNER):
     with service.store.engine.begin() as conn:
         quota = service.governance.quota(conn, owner)
         return quota, service.governance.usage(conn, quota) if quota else None
+
+
+def test_an_explicit_app_sender_uses_its_own_free_quota_with_flex_active(governed):
+    svc, _, _, _ = governed
+    edit(svc, FLEX, {"token_limit": 25})
+    app = "t:cli_fixture"
+    quota, _ = usage(svc, app)
+    assert quota["tier"] == "free"
+    assert quota["tracker"] == app
+    assert quota["limit"] == 500
 
 
 def test_flex_tracks_separate_usage_and_can_have_a_lower_limit(governed):
@@ -631,3 +642,105 @@ def test_configured_reasoning_options_and_native_wire_shape(monkeypatch):
     body = hermes.build(dict(request, reasoning_effort="high"))
     assert body["model"] == "model-b"
     assert body["model_options"] == {"reasoning_effort": "high"}
+
+
+def test_reports_count_distinct_adoption_and_finished_tool_calls(store):
+    today = datetime.now(timezone.utc).replace(
+        hour=6, minute=0, second=0, microsecond=0
+    )
+    sessions = [
+        ("analyst-a", "group", "oc_one", today - timedelta(days=2)),
+        ("analyst-a", "group", "oc_one", today - timedelta(days=1)),
+        ("analyst-a", "group", "oc_two", today - timedelta(days=1)),
+        ("analyst-b", "p2p", "oc_direct", today - timedelta(days=1)),
+    ]
+    with store.engine.begin() as conn:
+        for i, (owner, chat_type, chat_id, stamp) in enumerate(sessions):
+            conn.execute(
+                token_usage.insert().values(
+                    session_id=f"session-{i}",
+                    job_id=f"turn-{i}",
+                    requester=owner,
+                    principal=owner,
+                    chat_type=chat_type,
+                    chat_id=chat_id,
+                    model="sample-model",
+                    created_at=stamp,
+                    estimated_cost_usd=Decimal("0.25"),
+                )
+            )
+        for i, status in enumerate(("succeeded", "denied", "incomplete")):
+            conn.execute(
+                query_activity.insert().values(
+                    id=f"tool-{i}",
+                    session_id="session-1",
+                    job_id="turn-1",
+                    requester="analyst-a",
+                    principal="analyst-a",
+                    tool="run_query",
+                    status=status,
+                    created_at=sessions[1][3],
+                )
+            )
+    report = Reporting(store)
+    stats = report.get("summary", "all_time=true")["statistics"]
+    assert (stats["active_people"], stats["active_groups"], stats["llm_sessions"]) == (
+        2,
+        2,
+        4,
+    )
+    assert (
+        stats["activity_calls"],
+        stats["succeeded_calls"],
+        stats["denied_calls"],
+        stats["incomplete_calls"],
+    ) == (3, 1, 1, 1)
+    specific = report.get("summary", "all_time=true&requester=analyst-b")["statistics"]
+    assert (specific["active_people"], specific["active_groups"]) == (1, 0)
+    daily = report.get("daily", "all_time=true")["items"]
+    assert [row["active_people"] for row in daily] == [1, 2]
+    assert sum(Decimal(row["estimated_cost_usd"]) for row in daily) == Decimal(
+        stats["estimated_cost_usd"]
+    )
+    with report.export("dataset=daily&all_time=true") as (_, _, count, filename):
+        assert filename == "daily" and count == 2
+
+
+def test_summary_orders_priced_models_and_accounts_for_the_full_filtered_total(store):
+    rows = [
+        ("A", "40", "owner-a"),
+        ("B", "30", "owner-a"),
+        ("C", "15", "owner-a"),
+        ("D", "10", "owner-a"),
+        ("E", "5", "owner-a"),
+        ("F", "0", "owner-a"),
+        ("unpriced", None, "owner-a"),
+        ("A", "19", "owner-b"),
+    ]
+    with store.engine.begin() as conn:
+        for i, (model, cost, owner) in enumerate(rows):
+            conn.execute(
+                token_usage.insert().values(
+                    session_id=f"s-{i}",
+                    job_id=f"j-{i}",
+                    requester=owner,
+                    principal=owner,
+                    chat_type="group",
+                    model=model,
+                    estimated_cost_usd=Decimal(cost) if cost is not None else None,
+                )
+            )
+    report = Reporting(store)
+    result = report.get("summary", "requester=owner-a&limit=1")
+    shares = [
+        (r["model"], Decimal(r["estimated_cost_usd"])) for r in result["model_spend"]
+    ]
+    assert shares == [("A", 40), ("B", 30), ("C", 15), (None, 15)]
+    assert sum(value for _, value in shares) == Decimal(
+        result["statistics"]["estimated_cost_usd"]
+    )
+    assert (
+        result["statistics"]["priced_sessions"] == 6
+        and result["statistics"]["llm_sessions"] == 7
+    )
+    assert report.get("summary", "requester=absent")["model_spend"] == []

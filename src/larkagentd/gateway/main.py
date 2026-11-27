@@ -58,6 +58,7 @@ def check_database(store):
             "governance_rates",
             "governance_history",
             "knowledge_sources",
+            "knowledge_lark_attachments",
             "group_actions",
             "tool_effects",
         ):
@@ -112,6 +113,7 @@ def build_service(config, store, agent, knowledge_index=None):
         vision_models=config.vision_models,
         group_brain=config.group_brain,
         provider_model=config.provider_model,
+        lark_app_senders=set(config.lark_allowed_senders) - {"user"},
     )
 
 

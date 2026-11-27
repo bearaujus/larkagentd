@@ -31,6 +31,22 @@ def final_post(text, footer):
     return f"{text}\n\n{footer}" if footer else text
 
 
+def attachment_receipts(files):
+    receipts = []
+    for file in files:
+        rows = file.get("rows")
+        if type(rows) is int and rows >= 0:
+            unit = "data row" if rows == 1 else "data rows"
+            receipt = f"**CSV attached** · {rows:,} {unit}"
+            columns = file.get("columns")
+            if type(columns) is int and columns > 0:
+                receipt += f" · {columns:,} {'column' if columns == 1 else 'columns'}"
+            if file.get("note"):
+                receipt += f"\n\n{file['note']}"
+            receipts.append(receipt)
+    return "\n\n".join(receipts)
+
+
 def shorten(text, limit=MAX_CHARS):
     if len(text) <= limit:
         return text

@@ -12,6 +12,7 @@ from .larkcli import LarkError
 
 DRIVE_TYPES = {
     "docx": "docx",
+    "docs": "doc",
     "sheets": "sheet",
     "slides": "slides",
     "wiki": "wiki",
@@ -91,35 +92,54 @@ def _cells(raw):
         raise LarkError("bad_arguments") from None
 
 
-def _column_chart(data, ns, spec):
-    if not isinstance(spec, dict) or set(spec) != {"categories", "series"}:
+def _slide_chart(data, ns, spec):
+    if not isinstance(spec, dict) or set(spec) not in (
+        {"categories", "series"},
+        {"type", "categories", "series"},
+    ):
         raise LarkError("bad_slide")
+    kind = spec.get("type", "grouped_column")
+    if kind not in ("grouped_column", "percent_stacked_bar"):
+        raise LarkError("bad_slide")
+    stacked = kind == "percent_stacked_bar"
     categories, series = spec["categories"], spec["series"]
     if (
         not isinstance(categories, list)
-        or not 2 <= len(categories) <= 8
+        or not (1 if stacked else 2) <= len(categories) <= 8
         or not isinstance(series, list)
-        or not 1 <= len(series) <= 2
+        or not (2 if stacked else 1) <= len(series) <= (12 if stacked else 2)
     ):
         raise LarkError("bad_slide")
     labels = [_text(category, 24) for category in categories]
     if any(re.search(r"[,\r\n]", label) for label in labels):
         raise LarkError("bad_slide")
+    names = set()
+    totals = [0] * len(labels)
     chart = ET.SubElement(
         data,
         ns + "chart",
         {"width": "816", "height": "340", "topLeftX": "72", "topLeftY": "165"},
     )
     area = ET.SubElement(chart, ns + "chartPlotArea")
-    plot = ET.SubElement(area, ns + "chartPlot", {"type": "column"})
-    ET.SubElement(plot, ns + "chartExtra")
+    plot = ET.SubElement(
+        area, ns + "chartPlot", {"type": "bar" if stacked else "column"}
+    )
+    if stacked:
+        extra = ET.SubElement(plot, ns + "chartExtra")
+        ET.SubElement(extra, ns + "chartStack", {"percentage": "true"})
     axes = ET.SubElement(area, ns + "chartAxes")
     x = ET.SubElement(axes, ns + "chartAxis", {"type": "x"})
     ET.SubElement(x, ns + "chartLabel", {"fontSize": "12"})
     y = ET.SubElement(axes, ns + "chartAxis", {"type": "y", "position": "left"})
-    ET.SubElement(y, ns + "chartGridLine", {"color": "rgb(226, 232, 240)"})
+    ET.SubElement(
+        x if stacked else y, ns + "chartGridLine", {"color": "rgb(226, 232, 240)"}
+    )
     ET.SubElement(y, ns + "chartLabel", {"fontSize": "12"})
-    ET.SubElement(chart, ns + "chartLegend", {"position": "bottom", "fontSize": "14"})
+    ET.SubElement(
+        chart,
+        ns + "chartLegend",
+        {"position": "bottom", "fontSize": "12" if stacked else "14"},
+    )
     chart_data = ET.SubElement(chart, ns + "chartData")
     dimensions = ET.SubElement(chart_data, ns + "dim1")
     ET.SubElement(dimensions, ns + "chartField", {"name": "Category"}).text = ",".join(
@@ -138,17 +158,25 @@ def _column_chart(data, ns, spec):
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
                 or not -(10**15) <= value <= 10**15
+                or stacked
+                and value < 0
                 for value in values
             )
+            or stacked
+            and (name in names or len(set(labels)) != len(labels))
         ):
             raise LarkError("bad_slide")
+        names.add(name)
+        totals = [total + value for total, value in zip(totals, values)]
         ET.SubElement(measures, ns + "chartField", {"name": name}).text = ",".join(
             map(str, values)
         )
+    if stacked and any(total <= 0 for total in totals):
+        raise LarkError("bad_slide")
 
 
 def _slide_xml(page):
-    """Generate an editable slide from a text outline or grouped chart data."""
+    """Generate an editable slide from a text outline or chart data."""
     if not isinstance(page, dict) or set(page) not in (
         {"title", "bullets"},
         {"title", "chart"},
@@ -180,7 +208,7 @@ def _slide_xml(page):
     )
     ET.SubElement(title_content, ns + "p").text = title
     if "chart" in page:
-        _column_chart(data, ns, page["chart"])
+        _slide_chart(data, ns, page["chart"])
         return ET.tostring(root, encoding="unicode")
     bullets = page["bullets"]
     if not isinstance(bullets, list) or not 1 <= len(bullets) <= 5:
@@ -232,13 +260,14 @@ class LarkFiles:
             args += ["--data", json.dumps(body)]
         return self._cli(("api", method, "/open-apis/" + path), *args)
 
-    def members(self, link):
+    def members(self, link, *, single_page=False):
         data = self._cli(
             ("drive", "+member-list"),
             "--token",
             link.token,
             "--type",
             DRIVE_TYPES[link.kind],
+            *(("--perm-type", "single_page") if single_page else ()),
         )
         items = data.get("items")
         if not isinstance(items, list):
@@ -259,14 +288,15 @@ class LarkFiles:
             raise LarkError("lark_permission_unverified")
         return allowed
 
-    def tenant_readable(self, ctx, link, *, allow_thread=False):
+    def tenant_readable(self, ctx, link, *, allow_thread=False, attachment=False):
         """Verify an organization-only link can be read by everyone in this internal chat."""
         if (
             link.kind == "wiki"
             or not self.gateway_app
             or self.reader.app_id != self.gateway_app
             or (
-                link.token not in ctx.lark_allowed
+                not attachment
+                and link.token not in ctx.lark_allowed
                 and not (allow_thread and link.token in ctx.lark_thread_allowed)
             )
         ):
@@ -288,7 +318,9 @@ class LarkFiles:
         chat = self._api("GET", f"im/v1/chats/{_id(ctx.chat_id)}", {})
         return chat.get("external") is False and chat.get("tenant_key") == tenant
 
-    def require(self, ctx, link, write=False, *, allow_bot_edit=False):
+    def require(
+        self, ctx, link, write=False, *, allow_bot_edit=False, attachment=False
+    ):
         """Check live access and return whether the edit must use the bot's grant."""
         access = "edit" if write else "view"
         if ctx.chat_type != "group" or not ctx.chat_id:
@@ -311,7 +343,9 @@ class LarkFiles:
                 item.get("member_type") == "openchat"
                 and item.get("member_id") == ctx.chat_id
                 and item.get("perm") in roles
-                for item in self.members(link)
+                for item in self.members(
+                    link, single_page=attachment and link.kind == "wiki"
+                )
             ):
                 return False
         except LarkError as exc:
@@ -327,7 +361,12 @@ class LarkFiles:
         )
         if not write or bot_edit:
             try:
-                if self.tenant_readable(ctx, link, allow_thread=bot_edit):
+                if self.tenant_readable(
+                    ctx,
+                    link,
+                    allow_thread=bot_edit,
+                    attachment=attachment and not write,
+                ):
                     return bot_edit
             except LarkError as exc:
                 if str(exc) != "forbidden":

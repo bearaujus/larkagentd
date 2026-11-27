@@ -9,6 +9,10 @@
    you enable, and Drive metadata, collaborator list/grant, permission check and ownership
    transfer. Use the same app for receiving group requests and native authoring. Scopes
    grant the API surface. Individual files also require their Drive grants.
+   For attached knowledge sources, enable wiki node listing and lookup, current and classic
+   document reads, and Drive permission and collaborator reads for the Tool Service bot.
+   Share the selected space or pages with that bot. To quote a page, the bot must also be
+   able to verify the receiving group's view grant or applicable organization sharing.
 3. Fill the model provider settings. Set available model names and per-model reasoning
    options. Start the stack and verify Gateway, tools and Hermes readiness before any
    message test. The database migrates to the current Alembic revision.
@@ -40,6 +44,22 @@ are the references for the actual scopes exposed by your Lark app.
 the Gateway and Hermes. During the wait, new turns stay queued for the replacement
 Gateway. If existing work takes more than five minutes, the restart is cancelled and the
 current stack resumes accepting turns.
+
+## Configure who can trigger a reply
+
+Leave `LARK_ALLOWED_SENDERS` empty to accept people only. A nonempty list
+accepts exactly the entries you give it. For example, `LARK_ALLOWED_SENDERS=user,cli_example`
+accepts people and that specific Lark app. Use app IDs from the Lark developer console.
+
+To receive an app's mention, the receiving app needs the **Receive mentions from other
+bots and users** permission (`im:message.group_at_msg.include_bot:readonly`), the
+`im.message.receive_v1` subscription, and access to read the message back.
+[Lark receive event](https://open.larkenterprise.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive)
+
+App requests require an explicit mention in a registered group with All users access.
+The sending app uses its own free-tier quota and can call the group's permitted read
+tools. Human sign-in, confirmation actions and workspace management are for people.
+Set the list in the Gateway's environment and restart it after changes.
 
 ## Diagnose Lark file access
 

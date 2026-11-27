@@ -11,12 +11,14 @@ from sqlalchemy import func, select, update
 from ..core import group_actions
 from ..core.auth import AuthError, transient_auth_error
 from ..core.diagnostics import actor_ref, emit, job_fields
+from ..core.fields import lark_app_owner
 from ..core.googlelinks import links as google_links
 from ..core.scopes import BASELINE, group_chat_scope
 from ..core.store import (
     USAGE_COUNTS,
     database_time,
     jobs,
+    query_activity,
     token_usage,
     tool_registry,
     turns,
@@ -33,7 +35,7 @@ from ..lark.card_delivery import deliver_card
 from ..lark.cards import choice_pages, json_card
 from ..lark.inbound import IMAGE, takes_over, wants_setup
 from ..lark.progress import Progress
-from ..lark.render import answer_room, attach_code, with_blocks
+from ..lark.render import answer_room, attach_code, attachment_receipts, with_blocks
 from ..lark.ui_text import (
     AGENT_FAILURES,
     BUSY_REPLY,
@@ -49,6 +51,7 @@ from ..lark.ui_text import (
     IMAGES_FAILED,
     NOT_ALLOWED,
     NOTHING_RUNNING,
+    QUERY_ESTIMATE_DENIED,
     QUOTA_REACHED,
     RESUME_REQUEST,
     SETUP_GROUP_REQUIRED,
@@ -93,7 +96,9 @@ def group_speaker_names(transport, owner, remote):
         dict.fromkeys(
             person.partition(":")[2]
             for person in owners
-            if person.partition(":")[0] == tenant and person.partition(":")[2]
+            if person.partition(":")[0] == tenant
+            and person.partition(":")[2]
+            and not lark_app_owner(person)
         )
     )[:50]
     if not hasattr(transport, "display_names") or not ids:
@@ -208,6 +213,7 @@ class Service:
         provider_model="",
         governance=None,
         group_brain=None,
+        lark_app_senders=(),
     ):
         self.store, self.vault, self.cloud = store, vault, cloud
         self.history_limit, self.identity = history_limit, identity
@@ -221,6 +227,7 @@ class Service:
         self.vision_models = tuple(vision_models)
         self.provider_model = provider_model
         self.governance = governance
+        self.lark_app_senders = frozenset(lark_app_senders)
         # Group Brain's global settings; the default is switched off.
         self.group_brain = group_brain or GroupBrainConfig()
 
@@ -640,6 +647,13 @@ class Service:
         transport=None,
     ):
         owner = tenant + ":" + sender
+        app = lark_app_owner(owner)
+        if app and (
+            not group
+            or sender not in self.lark_app_senders
+            or text.lstrip().startswith("/")
+        ):
+            return
         parts = text.strip().split()
         dashboard_login = len(parts) in (2, 3) and [
             part.lower() for part in parts[:2]
@@ -743,7 +757,7 @@ class Service:
                     message_id,
                 )
                 return
-            if takes_over(text):
+            if not app and takes_over(text):
                 text = TAKEOVER_REQUEST
             if command == "/skills":
                 text = SKILLS_QUESTION
@@ -839,7 +853,7 @@ class Service:
                 dict(
                     new,
                     message_id=message_id,
-                    version=state.get("credential_version"),
+                    version=None if app else state.get("credential_version"),
                 ),
                 delay=self.message_window,
             )
@@ -1307,6 +1321,8 @@ class Service:
                 not job["payload"].get("group")
                 or not job["payload"].get("chat")
                 or snapshot.get("busy") != job["id"]
+                or lark_app_owner(owner)
+                and owner.partition(":")[2] not in self.lark_app_senders
             ):
                 with self.store.user(owner) as (conn, state):
                     if state.get("busy") == job["id"]:
@@ -1619,7 +1635,7 @@ class Service:
                     model=model,
                 )
             learning = None
-            if group:
+            if group and not lark_app_owner(owner):
                 try:
                     learning = prepare_passive_learning(self, job, session_id)
                 except Exception as exc:
@@ -1635,6 +1651,18 @@ class Service:
                     return
                 current = state.get("busy") == job["id"]
                 if current:
+                    if progress.tool_names == {"run_query"}:
+                        query_errors = conn.scalars(
+                            select(query_activity.c.error_code)
+                            .where(
+                                query_activity.c.session_id == session_id,
+                                query_activity.c.job_id == job["id"],
+                                query_activity.c.tool == "run_query",
+                            )
+                            .distinct()
+                        ).all()
+                        if query_errors == ["maxcompute_estimate_denied"]:
+                            reply, learning = QUERY_ESTIMATE_DENIED, None
                     reply, gb = self.guard_group_knowledge(conn, job, reply)
                     self.store.message(conn, owner, item)
                     # Corrections sent while it ran come right after the question, before the answer.
@@ -1654,12 +1682,19 @@ class Service:
                     previews, files = self.take_previews(conn, owner, job, session_id)
                     footer = self.token_footer(conn, owner, job, in_group=True)
                     sign_in = self.prepare_reply_sign_in(conn, owner, state, job)
+                    confirmation = self.pending_confirmation(conn, job)
                     response = "\n\n".join(
-                        part for part in (image_notice, reply, sign_in) if part
+                        part
+                        for part in (
+                            image_notice,
+                            attachment_receipts(files) if confirmation is None else "",
+                            reply,
+                            sign_in,
+                        )
+                        if part
                     )
                     answer, code_files = self.fit_answer(response, previews)
                     body = with_blocks(answer, [p["text"] for p in previews])
-                    confirmation = self.pending_confirmation(conn, job)
                     attachments = [*code_files, *files]
                     reply_to = job["payload"]["message_id"]
                     reply_chat = job["payload"].get("chat") or state["chat"]

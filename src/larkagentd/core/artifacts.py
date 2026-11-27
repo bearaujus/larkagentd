@@ -32,11 +32,18 @@ class Artifacts:
         body = {"text": text, "requested": requested, "limit": limit}
         return self.add(owner, session_id, body)
 
-    def put_file(self, owner, session_id, name, text):
+    def put_file(
+        self, owner, session_id, name, text, *, rows=None, columns=None, note=None
+    ):
         """Store a file to be sent with the reply; ArtifactLimit when the turn holds too many."""
-        return self.add(
-            owner, session_id, {"file": {"name": name, "text": text}}, capped=True
-        )
+        file = {"name": name, "text": text}
+        if rows is not None:
+            file["rows"] = rows
+        if columns is not None:
+            file["columns"] = columns
+        if note:
+            file["note"] = note
+        return self.add(owner, session_id, {"file": file}, capped=True)
 
     def add(self, owner, session_id, body, capped=False):
         ref = uuid.uuid4().hex
@@ -67,7 +74,15 @@ class Artifacts:
             try:
                 body = self.vault.open(self.context(owner, session_id, ref), sealed)
                 if "file" in body:
-                    file = {"name": body["file"]["name"], "text": body["file"]["text"]}
+                    saved = body["file"]
+                    file = {"name": saved["name"], "text": saved["text"]}
+                    file.update(
+                        {
+                            key: saved[key]
+                            for key in ("rows", "columns", "note")
+                            if key in saved
+                        }
+                    )
                     if file not in files:
                         files.append(file)
                     continue

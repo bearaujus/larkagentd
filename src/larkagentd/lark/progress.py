@@ -48,6 +48,7 @@ class Progress:
         self.prior_elapsed = prior_elapsed
         self.pending = []
         self.seen = set()
+        self.tool_names = set()
         self.steps = {}
         self.edits = 0
         self.dirty = self.closed = self.edit_failed = self.redirected = self.retried = (
@@ -75,6 +76,7 @@ class Progress:
         if phase == "started" and (not call or call not in self.seen):
             if call:
                 self.seen.add(call)
+            self.tool_names.add(tool)
             label = STATUS_STEPS.get(tool, "Using a tool")
             stats = self.steps.pop(label, [0, 0, 0])
             stats[0] += 1
@@ -126,14 +128,13 @@ class Progress:
         for label, (calls, errors, running) in list(self.steps.items())[
             -VISIBLE_STEPS:
         ]:
-            state = (
-                "Running"
-                if running and outcome is None
-                else (
-                    "Result unavailable" if running else "Issue" if errors else "Done"
-                )
-            )
             repeat = f" · {calls} calls" if calls > 1 else ""
+            if running:
+                state = "Running" if outcome is None else "Result unavailable"
+            elif 0 < errors < calls:
+                state, repeat = f"{calls - errors} of {calls} succeeded", ""
+            else:
+                state = "Issue" if errors else "Done"
             lines.append(f"{label} · {state}{repeat}")
         text = "\n".join([status, *[f"- {line}" for line in lines]])
         return activity_card(status, lines, expanded=outcome is None), text

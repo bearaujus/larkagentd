@@ -517,6 +517,7 @@ export function GroupDetail({ showKnowledge }: { showKnowledge: boolean }) {
         description={knowledgePage ? "Group knowledge" : "Group access policy"}
         action={
           showKnowledge &&
+          !knowledgePage &&
           query.data && (
             <Confirm
               label="Delete group"
@@ -539,14 +540,16 @@ export function GroupDetail({ showKnowledge }: { showKnowledge: boolean }) {
         }
       />
       {notice && <Notice tone="success">{notice}</Notice>}
-      <div className="group-detail-meta">
-        <Identity
-          target={target}
-          metadata={directory.get(target)}
-          refresh={directory.refresh}
-        />
-        <CopyId value={id} />
-      </div>
+      {!knowledgePage && (
+        <div className="group-detail-meta">
+          <Identity
+            target={target}
+            metadata={directory.get(target)}
+            refresh={directory.refresh}
+          />
+          <CopyId value={id} />
+        </div>
+      )}
       <nav className="group-sections" aria-label="Group sections">
         <Link to={path} aria-current={!knowledgePage ? "page" : undefined}>
           Access and tools
@@ -572,7 +575,11 @@ export function GroupDetail({ showKnowledge }: { showKnowledge: boolean }) {
             </>
           )}
           {knowledgePage && showKnowledge && (
-            <KnowledgeLibrary key={"knowledge:" + id} groupId={id} />
+            <KnowledgeLibrary
+              key={"knowledge:" + id}
+              groupId={id}
+              groupName={directory.get(target)?.name || undefined}
+            />
           )}
           {knowledgePage && <GroupBrain key={id} groupId={id} />}
         </>

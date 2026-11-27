@@ -795,8 +795,8 @@ export function GroupBrain({ groupId }: { groupId: string }) {
             <Dialog.Title>Purge conversation knowledge?</Dialog.Title>
             <Dialog.Description>
               This permanently removes the group’s discussion history and
-              learned records. Added Markdown sources are managed separately.
-              Backups follow the retention policy.
+              learned records. Added sources are managed separately. Backups
+              follow the retention policy.
             </Dialog.Description>
             {purgeError && <p role="alert">{purgeError}</p>}
             <label>

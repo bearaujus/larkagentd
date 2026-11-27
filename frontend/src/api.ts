@@ -83,6 +83,9 @@ export function message(error: unknown) {
   const codes: Record<string, string> = {
     group_admin_required: "Your current Lark group role could not be verified.",
     group_dashboard_scope: "This session is limited to your group knowledge.",
+    invalid_lark_url: "Use a Lark wiki space settings, wiki page or Doc link.",
+    invalid_source_name:
+      "Use a source name between 1 and 96 printable characters.",
     invalid_source: "Check the source name and content or MCP resource URI.",
     invalid_origin:
       "This address can't make dashboard changes. Open an approved dashboard address and sign in there.",

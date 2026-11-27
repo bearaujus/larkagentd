@@ -38,10 +38,13 @@ the workspace. Dashboard access remains available during the pause.
 
 ## Knowledge
 
-Workspace Markdown and attached MCP resources apply to all admitted groups. The group
-Markdown library applies to that group. The administrator supplies MCP endpoints or
-trusted stdio command paths in deployment configuration. The dashboard attaches a named
-resource URI. Retrieval calls only the resource read API. Managed groups can search
+Workspace sources are available to admitted groups. Each group also has its own curated sources.
+Both scopes accept Markdown, Lark Docs and wiki branches or spaces. The Tool Service indexes attached
+pages and verifies current Lark sharing, revision and attachment membership before returning a citation.
+
+For workspace MCP sources, the administrator supplies endpoints or trusted stdio command paths in
+deployment configuration. The dashboard attaches a named resource URI. Retrieval calls the MCP
+resource read API. Managed groups can search
 visible Lark history on request. History queries can start at the oldest visible message,
 continue with Lark's cursor, and cite provider-supplied conversation jump links.
 
